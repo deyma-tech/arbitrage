@@ -1,0 +1,14 @@
+use solana_program::pubkey::Pubkey;
+
+pub fn get_withdraw_authority_address(vault_address: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"withdraw_authority", &vault_address.to_bytes()], &super::ID).0
+}
+
+pub fn get_pool_authority_address(pool_address: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool_authority", &pool_address.to_bytes()], &super::ID).0
+}
+
+// here is ID vo1tWgqZMjG61Z2T9qUaMYKqZ75CYzMuaZ2LZP1n7HV
+// pub fn get_vault_authority_address(vault_address: &Pubkey) -> Pubkey {
+//     Pubkey::find_program_address(&[b"vault_authority", &vault_address.to_bytes()], &ID).0
+// }

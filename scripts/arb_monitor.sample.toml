@@ -1,0 +1,13 @@
+[telegram]
+token = "***"
+chat_id = 0
+
+[services]
+names = ["arb"]
+
+[monitoring]
+# Minimum service uptime in seconds (3600 = 1 hour)
+min_uptime = 3600
+
+[logging]
+log_file = "/tmp/arb_monitor.log"

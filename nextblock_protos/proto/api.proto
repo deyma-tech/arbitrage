@@ -1,0 +1,156 @@
+syntax = "proto3";
+package api;
+option go_package = "github.com/nextblock/api";
+
+import "google/api/annotations.proto";
+import "google/api/field_behavior.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
+
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  security: {
+    security_requirement: {
+      key: "Auth Header";
+      value: {
+        scope: []
+      }
+    }
+  }
+  security_definitions: {
+    security: {
+      key: "Auth Header";
+      value: {
+        type: TYPE_API_KEY;
+        in: IN_HEADER;
+        name: "Authorization";
+      };
+    }
+  };
+  info: {
+    title: "NextBlock Solana API";
+    version: "1.0";
+    description: "API for fastest tx delivery in all of solana.";
+    contact: {
+      name: "NextBlock.IO API Documentation";
+      url: "https://docs.nextblock.io/";
+      email: "support@nextblock.io";
+    };
+  };
+
+  consumes: "application/json";
+  produces: "application/json";
+};
+
+service Api {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_tag) = {
+    external_docs: {
+      description: "Detailed API documentation";
+      url: "https://docs.nextblock.io/"
+    }
+  };
+
+  rpc PostSubmitV2(PostSubmitRequest) returns (PostSubmitResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/submit"
+      body: "*"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      description: "Submits a signed transaction";
+      summary: "Transaction submit";
+      tags: ["Generic"];
+    };
+  }
+
+  rpc PostSubmitBatchV2(PostSubmitBatchRequest) returns (PostSubmitResponse) {
+    option (google.api.http) = {
+      post: "/api/v2/submit-batch"
+      body: "*"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      description: "Submits a batch of signed transactions";
+      summary: "Transaction batch submit";
+      tags: ["Generic"];
+    };
+  }
+
+  rpc Ping(PingRequest) returns (PongResponse) {
+    option (google.api.http) = {
+      get: "/api/v2/ping"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      description: "Simple ping endpoint to check API health and keep connections alive";
+      summary: "Ping the API server";
+      tags: ["Utility"];
+    };
+  }
+
+  rpc GetTipFloor(TipFloorRequest) returns (TipFloorResponse) {
+    option (google.api.http) = {
+      get: "/api/v2/tipfloor"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      description: "Endpoint to get the last 5 minutes tip distribution";
+      summary: "Get the tip floor";
+      tags: ["Utility"];
+    };
+  }
+
+  rpc StreamTipFloor(TipFloorStreamRequest) returns (stream TipFloorResponse);
+}
+
+message TipFloorRequest {}
+
+message TipFloorStreamRequest {
+  string update_frequency = 1; // e.g. "1m", "5m", "10m"
+}
+
+message TipStats {
+  string time = 1;
+  double landed_tips_25th_percentile = 2;
+  double landed_tips_50th_percentile = 3;
+  double landed_tips_75th_percentile = 4;
+  double landed_tips_95th_percentile = 5;
+  double landed_tips_99th_percentile = 6;
+  double ema_landed_tips_50th_percentile = 7;
+}
+
+message TipFloorResponse {
+  repeated TipStats stats = 1;
+}
+
+// Add these message definitions
+message PingRequest {}
+
+message PongResponse {}
+
+message PostSubmitRequest {
+  TransactionMessage transaction = 1 [(google.api.field_behavior) = REQUIRED];
+  bool skipPreFlight = 2;
+  optional bool frontRunningProtection = 3;
+  reserved 4, 6, 7;
+  reserved "tip", "useStakedRPCs", "fastBestEffort";
+  optional bool experimentalFrontRunningProtection = 8;
+  optional bool snipeTransaction = 9;
+  optional bool disableRetries = 10;
+  optional bool revertOnFail = 11;
+}
+
+message PostSubmitRequestEntry {
+  TransactionMessage transaction = 1 [(google.api.field_behavior) = REQUIRED];
+}
+
+message PostSubmitBatchRequest {
+  repeated PostSubmitRequestEntry entries = 1;
+}
+
+message PostSubmitResponse {
+  string signature = 1;
+}
+
+message TransactionMessage {
+  string content = 1;
+  bool isCleanup = 2;
+}
+
+message TransactionMessageV2 {
+  string content = 1;
+}

@@ -1,0 +1,51 @@
+/home/ubuntu/.local/share/solana/install/active_release/bin/agave-validator \
+    --identity /home/ubuntu/.config/solana/vote.json \
+    --no-voting\
+    --known-validator 7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2 \
+    --known-validator GdnSyH3YtwcxFvQrVVJMm1JhTS4QVX7MFsX56uJLUfiZ \
+    --known-validator DE1bawNcRJB9rVm3buyMVfr8mBEoyyu73NBovf2oXJsJ \
+    --known-validator CakcnaRDHka2gXyfbEd2d3xsvkJkqsLw2akB3zsN1D2S \
+    --known-validator DtdSSG8ZJRZVv5Jx7K1MeWp7Zxcu19GD5wQRGRpQ9uMF \
+    --known-validator CW9C7HBwAMgqNdXkNgFg9Ujr3edR2Ab9ymEuQnVacd1A \
+    --known-validator HEL1USMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU \
+    --known-validator q9XWcZ7T1wP4bW9SB4XgNNwjnFEJ982nE8aVbbNuwot \
+    --known-validator GoeW4aFK4dGoekJySgUynWDxBZiQJqm8GDAF4H53tDK9 \
+    --known-validator krakeNd6ednDPEXxHAmoBs1qKVM8kLg79PvWF2mhXV1 \
+    --only-known-rpc \
+    --full-rpc-api \
+    --gossip-port 8801 \
+    --ledger /mnt/ledger \
+    --accounts /mnt/accounts \
+    --snapshots /mnt/snapshots \
+    --rpc-port 7799 \
+    --rpc-bind-address 0.0.0.0 \
+    --dynamic-port-range 8000-8100 \
+    --entrypoint entrypoint.mainnet-beta.solana.com:8001 \
+    --entrypoint entrypoint2.mainnet-beta.solana.com:8001 \
+    --entrypoint entrypoint3.mainnet-beta.solana.com:8001 \
+    --entrypoint entrypoint4.mainnet-beta.solana.com:8001 \
+    --entrypoint entrypoint5.mainnet-beta.solana.com:8001 \
+    --expected-genesis-hash 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d \
+    --wal-recovery-mode skip_any_corrupted_record \
+    --limit-ledger-size 100000000  \
+    --log - \
+    --minimal-snapshot-download-speed 3048576000 \
+    --no-port-check \
+    --rpc-max-multiple-accounts 500 \
+    --geyser-plugin-config /home/ubuntu/config.json \
+    --account-index program-id \
+    --account-index-include-key 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 \
+    --account-index-include-key LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo \
+    --account-index-include-key CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK \
+    --account-index-include-key whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc \
+    --account-index-include-key pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA \
+    --account-index-include-key swapNyd8XiQwJ6ianp9snpu4brUqFxadzvHebnAXjJZ \
+    --account-index-include-key 8BR3zs8zSXetpnDjCtHWnkpSkNSydWb3PTTDuVKku2uu \
+    --account-index-include-key 2wT8Yq49kHgDzXuPxZSaeLaH1qbmGXtEyPy64bL7aD3c \
+    --account-index-include-key swapFpHZwjELNnjvThjajtiVmkz3yPQEHjLtka2fwHW \
+    --account-index-include-key CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C \
+    --account-index-include-key 9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP \
+    --account-index-include-key GAMMA7meSFWaBXF25oSUgmGRwaW6sCMFLmBNiMSdbHVT \
+    --account-index-include-key obriQD1zbpyLz95G5n7nJe6a4DPjpFwa5XYPoNm113y \
+    --account-index-include-key cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG \
+    --account-index-include-key TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA

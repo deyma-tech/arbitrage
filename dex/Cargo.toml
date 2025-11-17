@@ -1,0 +1,60 @@
+[package]
+name = "dex"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+serde = []
+
+[dependencies]
+num_enum = "0.7.1"
+ruint = "1.3.0"
+num-integer = "0.1.45"
+anyhow = { workspace = true }
+num-derive = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+utils = { path = "../utils" }
+spl-token = {  workspace = true }
+spl-token-2022 = { workspace = true}
+orca_whirlpools_client = { workspace = true }
+orca_whirlpools_core = "1.0.5"
+#safe-transmute = { workspace = true }
+base64 = {  workspace = true }
+bincode = { workspace = true}
+solana-sdk = { workspace = true }
+uint = { workspace = true }
+spl-associated-token-account = "6.0.0"
+serde = { workspace = true }
+ahash = { workspace = true }
+spl-token-swap = { version = "2.1.0", features = ["no-entrypoint"] }
+fixed = "1.28.0"
+typenum = "1.18.0"
+lazy_static = "1.5.0"
+
+# phoenix
+#lib-sokoban = "=0.3.0" 
+itertools = "=0.10.5"
+
+#jupiter-amm-interface = "0.5.0"
+
+# invariant swap
+proc-macro2 = "1.0"
+#syn = { version = "1.0.60", features = ["full"] }
+quote = "1.0"
+
+[dependencies.borsh]
+version = "^0.10"
+
+[dependencies.num-traits]
+version = "^0.2"
+
+#[dependencies.serde]
+#optional = true
+#version = "^1.0"
+
+[dependencies.solana-program]
+version = "2.1.0"
+
+[dependencies.thiserror]
+version = "^1.0"

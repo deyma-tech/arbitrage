@@ -1,0 +1,62 @@
+[package]
+name = "arb-bot"
+version = "0.8.3-pump"
+edition = "2021"
+
+[lib]
+name = "arb_bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "arb-bot"
+path = "src/main.rs"
+
+[dependencies]
+dex = { path = "../dex" }
+utils = { path = "../utils"}
+arb-core = { path  = "../arb-core"}
+config = { path = "../config" }
+record = { path = "../record" }
+bloxroute-client = { path = "../bloxroute-client" }
+jito-searcher-client = { path = "../jito_searcher_client" }
+jito-protos = { path = "../jito_protos"}
+tokio = { workspace = true }
+questdb-rs = "4.0.3"
+env_logger = "0.11.6"
+solana-sdk = { workspace = true }
+solana-program = { workspace = true }
+solana-address-lookup-table-interface = { workspace = true }
+futures = "0.3.31"
+log = { workspace = true }
+ordered-float = "5.0.0"
+spl-token = { workspace = true }
+spl-associated-token-account = "6.0.0"
+anyhow = { workspace = true}
+bytemuck = { workspace = true}
+solana-client = { workspace = true}
+solana-account-decoder = { workspace = true }
+chrono = "0.4.39"
+solana-trader-proto = { git = "https://github.com/bloXroute-Labs/solana-trader-proto.git" }
+tonic = { version = "0.12.3", features = ["transport", "tls"]}
+bincode = { workspace = true }
+bytes = "1.10.0"
+rand = { workspace = true }
+reqwest = { version = "0.12.12", features = ["blocking"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+num-traits = { workspace = true }
+fred = "8.0.6"
+ahash = { workspace = true }
+kv = "0.24.0"
+once_cell = "1.21.3"
+zmq2 = { workspace = true }
+spl-token-2022 = "8.0.1"
+solana-program-pack = "2.1.18"
+spl-token-metadata-interface = "0.7.0"
+spl-type-length-value = "0.8.0"
+nextblock-client = { path = "../nextblock-client"}
+nextblock-protos = { path = "../nextblock_protos"}
+clap = { version = "4.5.29", features = ["derive", "cargo"] }
+crossbeam-channel = "0.5"
+
+tikv-jemallocator = "0.5"

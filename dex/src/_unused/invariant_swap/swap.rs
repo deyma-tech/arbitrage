@@ -1,0 +1,197 @@
+
+impl<'info> Swap<'info> {
+    pub fn handler(
+        ctx: Context<'_, '_, '_, 'info, Swap<'info>>,
+        x_to_y: bool,
+        amount: u64,
+        by_amount_in: bool, // whether amount specifies input or output
+        sqrt_price_limit: u128,
+    ) -> ProgramResult {
+        msg!("INVARIANT: SWAP");
+        require!(amount != 0, ZeroAmount);
+
+        let sqrt_price_limit = Price::new(sqrt_price_limit);
+        let mut pool = ctx.accounts.pool.load_mut()?;
+        let tickmap = ctx.accounts.tickmap.load()?;
+        let state = ctx.accounts.state.load()?;
+
+        let ref_account = match ctx
+            .remaining_accounts
+            .iter()
+            .find(|account| *account.owner == token::ID)
+        {
+            Some(account) => match Account::<'_, TokenAccount>::try_from(account) {
+                Ok(token) => {
+                    let is_valid_mint = token.mint
+                        == match x_to_y {
+                            true => ctx.accounts.account_x.mint,
+                            false => ctx.accounts.account_y.mint,
+                        };
+                    let is_on_whitelist = contains_owner(token.owner);
+                    match is_valid_mint && is_on_whitelist {
+                        true => Some(account),
+                        false => None,
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+
+        // limit is on the right side of price
+        if x_to_y {
+            require!(
+                { pool.sqrt_price } > sqrt_price_limit
+                    && sqrt_price_limit <= Price::new(MAX_SQRT_PRICE),
+                WrongLimit
+            );
+        } else {
+            require!(
+                { pool.sqrt_price } < sqrt_price_limit
+                    && sqrt_price_limit >= Price::new(MIN_SQRT_PRICE),
+                WrongLimit
+            );
+        }
+
+        let mut remaining_amount = TokenAmount(amount);
+
+        let mut total_amount_in = TokenAmount(0);
+        let mut total_amount_out = TokenAmount(0);
+        let mut total_amount_referral = TokenAmount(0);
+
+        while !remaining_amount.is_zero() {
+            let (swap_limit, limiting_tick) = get_closer_limit(
+                sqrt_price_limit,
+                x_to_y,
+                pool.current_tick_index,
+                pool.tick_spacing,
+                &tickmap,
+            )?;
+
+            let result = compute_swap_step(
+                pool.sqrt_price,
+                swap_limit,
+                pool.liquidity,
+                remaining_amount,
+                by_amount_in,
+                pool.fee,
+            );
+            // make remaining amount smaller
+            if by_amount_in {
+                remaining_amount -= result.amount_in + result.fee_amount;
+            } else {
+                remaining_amount -= result.amount_out;
+            }
+
+            total_amount_referral += match ref_account.is_some() {
+                true => pool.add_fee(result.fee_amount, FixedPoint::from_scale(2, 1), x_to_y),
+                false => pool.add_fee(result.fee_amount, FixedPoint::from_integer(0), x_to_y),
+            };
+
+            pool.sqrt_price = result.next_price_sqrt;
+
+            total_amount_in += result.amount_in + result.fee_amount;
+            total_amount_out += result.amount_out;
+
+            // Fail if price would go over swap limit
+            if { pool.sqrt_price } == sqrt_price_limit && !remaining_amount.is_zero() {
+                return Err(ErrorCode::PriceLimitReached.into());
+            }
+
+            // crossing tick
+            // trunk-ignore(clippy/unnecessary_unwrap)
+            if result.next_price_sqrt == swap_limit && limiting_tick.is_some() {
+                let (tick_index, initialized) = limiting_tick.unwrap();
+
+                let is_enough_amount_to_cross = is_enough_amount_to_push_price(
+                    remaining_amount,
+                    result.next_price_sqrt,
+                    pool.liquidity,
+                    pool.fee,
+                    by_amount_in,
+                    x_to_y,
+                );
+
+                if initialized {
+                    // Calculating address of the crossed tick
+                    let (tick_address, _) = Pubkey::find_program_address(
+                        &[
+                            b"tickv1",
+                            ctx.accounts.pool.to_account_info().key.as_ref(),
+                            &tick_index.to_le_bytes(),
+                        ],
+                        ctx.program_id,
+                    );
+
+                    // Finding the correct tick in remaining accounts
+                    let loader = match ctx
+                        .remaining_accounts
+                        .iter()
+                        .find(|account| *account.key == tick_address)
+                    {
+                        Some(account) => AccountLoader::<'_, Tick>::try_from(account).unwrap(),
+                        None => return Err(ErrorCode::TickNotFound.into()),
+                    };
+                    let mut tick = loader.load_mut().unwrap();
+
+                    // crossing tick
+                    if !x_to_y || is_enough_amount_to_cross {
+                        msg!("INVARIANT: CROSSING TICK {} ", { tick.index });
+                        cross_tick(&mut tick, &mut pool, get_current_timestamp())?;
+                    } else if !remaining_amount.is_zero() {
+                        if by_amount_in {
+                            pool.add_fee(remaining_amount, FixedPoint::from_integer(0), x_to_y);
+                            total_amount_in += remaining_amount;
+                        }
+                        remaining_amount = TokenAmount(0);
+                    }
+                }
+                // set tick to limit (below if price is going down, because current tick should always be below price)
+                pool.current_tick_index = if x_to_y && is_enough_amount_to_cross {
+                    tick_index.checked_sub(pool.tick_spacing as i32).unwrap()
+                } else {
+                    tick_index
+                };
+            } else {
+                assert!(
+                    pool.current_tick_index
+                        .checked_rem(pool.tick_spacing.into())
+                        .unwrap()
+                        == 0,
+                    "tick not divisible by spacing"
+                );
+                pool.current_tick_index =
+                    get_tick_at_sqrt_price(result.next_price_sqrt, pool.tick_spacing);
+            }
+        }
+
+        if total_amount_out.0 == 0 {
+            return Err(ErrorCode::NoGainSwap.into());
+        }
+
+        // Execute swap
+        let (take_ctx, send_ctx) = match x_to_y {
+            true => (ctx.accounts.take_x(), ctx.accounts.send_y()),
+            false => (ctx.accounts.take_y(), ctx.accounts.send_x()),
+        };
+
+        let signer: &[&[&[u8]]] = get_signer!(state.nonce);
+        token::transfer(send_ctx.with_signer(signer), total_amount_out.0)?;
+
+        match ref_account.is_some() && !total_amount_referral.is_zero() {
+            true => {
+                let take_ref_ctx = match x_to_y {
+                    true => ctx.accounts.take_ref_x(ref_account.unwrap().clone()),
+                    false => ctx.accounts.take_ref_y(ref_account.unwrap().clone()),
+                };
+                token::transfer(take_ctx, total_amount_in.0 - total_amount_referral.0)?;
+                token::transfer(take_ref_ctx, total_amount_referral.0)?;
+            }
+            false => {
+                token::transfer(take_ctx, total_amount_in.0)?;
+            }
+        }
+
+        Ok(())
+    }
+}

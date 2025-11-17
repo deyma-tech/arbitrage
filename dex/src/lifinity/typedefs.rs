@@ -1,0 +1,58 @@
+//use borsh::{BorshDeserialize, BorshSerialize};
+
+#[derive(Clone, Debug, PartialEq)] // BorshDeserialize, BorshSerialize,
+pub struct AmmFees {
+    pub trade_fee_numerator: u64,
+    pub trade_fee_denominator: u64,
+    pub owner_trade_fee_numerator: u64,
+    pub owner_trade_fee_denominator: u64,
+    pub owner_withdraw_fee_numerator: u64,
+    pub owner_withdraw_fee_denominator: u64,
+    pub host_fee_numerator: u64,
+    pub host_fee_denominator: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)] // BorshDeserialize, BorshSerialize,
+pub struct AmmCurve {
+    pub curve_type: u8,
+    pub curve_parameters: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)] // BorshDeserialize, BorshSerialize,
+pub struct AmmConfig {
+    pub last_price: u64,
+    pub last_balanced_price: u64,
+    pub config_denominator: u64,
+    pub volume_x: u64,
+    pub volume_y: u64,
+    pub volume_x_in_y: u64,
+    pub deposit_cap: u64,
+    pub regression_target: u64,
+    pub oracle_type: u64,
+    pub oracle_status: u64,
+    pub oracle_main_slot_limit: u64,
+    pub oracle_sub_confidence_limit: u64,
+    pub oracle_sub_slot_limit: u64,
+    pub oracle_pc_confidence_limit: u64,
+    pub oracle_pc_slot_limit: u64,
+    pub std_spread: u64,
+    pub std_spread_buffer: u64,
+    pub spread_coefficient: u64,
+    pub price_buffer_coin: i64,
+    pub price_buffer_pc: i64,
+    pub rebalance_ratio: u64,
+    pub fee_trade: u64,
+    pub fee_platform: u64,
+    pub oracle_main_slot_buffer: u64,
+    pub config_temp4: u64,
+    pub config_temp5: u64,
+    pub config_temp6: u64,
+    pub config_temp7: u64,
+    pub config_temp8: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)] // BorshDeserialize, BorshSerialize,
+pub enum CurveType {
+    Standard,
+    ConstantProduct,
+}

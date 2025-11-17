@@ -1,0 +1,124 @@
+use super::big_num::U1024;
+
+use super::{
+    accounts::TickArrayState,
+    constants::{TICK_ARRAY_BITMAP_SIZE, TICK_ARRAY_SIZE},
+    typedefs::TickState,
+};
+use anyhow::{Context, Result};
+
+pub type TickArryBitmap = [u64; 8];
+
+pub fn max_tick_in_tickarray_bitmap(tick_spacing: u16) -> i32 {
+    i32::from(tick_spacing) * TICK_ARRAY_SIZE * TICK_ARRAY_BITMAP_SIZE
+}
+
+pub fn get_bitmap_tick_boundary(tick_array_start_index: i32, tick_spacing: u16) -> (i32, i32) {
+    let ticks_in_one_bitmap: i32 = max_tick_in_tickarray_bitmap(tick_spacing);
+    let mut m = tick_array_start_index.abs() / ticks_in_one_bitmap;
+    if tick_array_start_index < 0 && tick_array_start_index.abs() % ticks_in_one_bitmap != 0 {
+        m += 1;
+    }
+    let min_value: i32 = ticks_in_one_bitmap * m;
+    if tick_array_start_index < 0 {
+        (-min_value, -min_value + ticks_in_one_bitmap)
+    } else {
+        (min_value, min_value + ticks_in_one_bitmap)
+    }
+}
+
+pub fn most_significant_bit(x: U1024) -> Option<u16> {
+    if x.is_zero() {
+        None
+    } else {
+        u16::try_from(x.leading_zeros()).ok()
+    }
+}
+
+pub fn least_significant_bit(x: U1024) -> Option<u16> {
+    if x.is_zero() {
+        None
+    } else {
+        u16::try_from(x.trailing_zeros()).ok()
+    }
+}
+
+/// Given a tick, calculate whether the tickarray it belongs to has been initialized.
+pub fn check_current_tick_array_is_initialized(
+    bit_map: U1024,
+    tick_current: i32,
+    tick_spacing: u16,
+) -> Result<(bool, i32)> {
+    if TickState::check_is_out_of_boundary(tick_current) {
+        return Err(anyhow::format_err!("ErrorCode::InvaildTickIndex"));
+    }
+    let multiplier = i32::from(tick_spacing) * TICK_ARRAY_SIZE;
+    let mut compressed = tick_current / multiplier + 512;
+    if tick_current < 0 && tick_current % multiplier != 0 {
+        // round towards negative infinity
+        compressed -= 1;
+    }
+    let bit_pos = compressed.abs();
+    // set current bit
+    let mask = U1024::one() << bit_pos.try_into().context("RaydiumCLMMCheckCurrentTickArray")?;
+    let masked = bit_map & mask;
+    // check the current bit whether initialized
+    let initialized = masked != U1024::default();
+    if initialized {
+        return Ok((true, (compressed - 512) * multiplier));
+    }
+    // the current bit is not initialized
+    Ok((false, (compressed - 512) * multiplier))
+}
+
+pub fn next_initialized_tick_array_start_index(
+    bit_map: U1024,
+    last_tick_array_start_index: i32,
+    tick_spacing: u16,
+    zero_for_one: bool,
+) -> anyhow::Result<(bool, i32)> {
+    let tick_boundary = max_tick_in_tickarray_bitmap(tick_spacing);
+    let next_tick_array_start_index = if zero_for_one {
+        last_tick_array_start_index - TickArrayState::tick_count(tick_spacing)
+    } else {
+        last_tick_array_start_index + TickArrayState::tick_count(tick_spacing)
+    };
+
+    if next_tick_array_start_index < -tick_boundary || next_tick_array_start_index >= tick_boundary {
+        return Ok((false, last_tick_array_start_index));
+    }
+
+    let multiplier = i32::from(tick_spacing) * TICK_ARRAY_SIZE;
+    let mut compressed = next_tick_array_start_index / multiplier + 512;
+    if next_tick_array_start_index < 0 && next_tick_array_start_index % multiplier != 0 {
+        // round towards negative infinity
+        compressed -= 1;
+    }
+    let bit_pos = compressed.abs();
+
+    if zero_for_one {
+        // tick from upper to lower
+        // find from highter bits to lower bits
+        let offset_bit_map = bit_map << (1024 - bit_pos - 1).try_into().context("RaydiumCLMMBitPos")?;
+        let next_bit = most_significant_bit(offset_bit_map);
+        if let Some(next_bit) = next_bit {
+            let next_array_start_index = (bit_pos - i32::from(next_bit) - 512) * multiplier;
+            Ok((true, next_array_start_index))
+        } else {
+            // not found til to the end
+            Ok((false, -tick_boundary))
+        }
+    } else {
+        // tick from lower to upper
+        // find from lower bits to highter bits
+        let offset_bit_map = bit_map >> (bit_pos).try_into().context("RaydiumCLMMBitPos")?;
+        let next_bit = least_significant_bit(offset_bit_map);
+        if let Some(next_bit) = next_bit {
+            let next_array_start_index = (bit_pos + i32::from(next_bit) - 512) * multiplier;
+            Ok((true, next_array_start_index))
+        } else {
+            // not found til to the end
+            Ok((false, tick_boundary - TickArrayState::tick_count(tick_spacing)))
+        }
+    }
+}

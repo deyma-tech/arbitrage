@@ -1,0 +1,14 @@
+[package]
+name = "nextblock-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nextblock-protos = { path = "../nextblock_protos"}
+tonic = { version = "=0.8.3", features = ["transport", "tls"]}
+tokio = "1.44.1"
+rand = "0.8.5"
+solana-sdk = { workspace = true }
+solana-client = { workspace = true }
+utils = { path = "../utils"}
+bincode = { workspace = true }
