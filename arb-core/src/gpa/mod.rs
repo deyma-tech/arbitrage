@@ -1,5 +1,7 @@
 use ahash::{AHashMap as HashMap, AHashSet};
-use log::{debug, error, info};
+use crossbeam_channel::Sender;
+use futures::StreamExt;
+use log::{debug, error, info, warn};
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
@@ -10,11 +12,11 @@ use solana_sdk::account::Account;
 use solana_sdk::clock::Slot;
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::collections::{BTreeMap, HashSet};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::select;
-use utils::deserialize::deserialize_v2;
+use utils::deserialize::{Message, MessagesV2};
 use utils::pool::PoolType;
-use utils::safe::ResultExt;
 // use zeromq::{Socket, SocketRecv};
 
 use crate::calculator::CalculatorEnum;
@@ -83,6 +85,82 @@ async fn fetch_program_accounts(url: &str, program_id: &Pubkey) -> Vec<(Pubkey, 
     }
 }
 
+/// Fetch account data without asking the RPC to materialize one enormous
+/// full-data GPA response. The first request returns only matching pubkeys;
+/// account data is then hydrated through bounded getMultipleAccounts batches.
+/// This is especially important for large DLMM programs.
+pub async fn fetch_program_accounts_by_discriminators(
+    url: &str,
+    program_id: &Pubkey,
+    discriminators: &[[u8; 8]],
+) -> Vec<(Pubkey, Account)> {
+    let client = new_rpc_client(url);
+    let mut all_accounts = Vec::new();
+
+    for discriminator in discriminators {
+        let filters = vec![RpcFilterType::Memcmp(Memcmp::new(
+            0,
+            MemcmpEncodedBytes::Bytes(discriminator.to_vec()),
+        ))];
+        let config = RpcProgramAccountsConfig {
+            filters: Some(filters),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                data_slice: Some(solana_account_decoder::UiDataSliceConfig { offset: 0, length: 0 }),
+                commitment: Some(CommitmentConfig::processed()),
+                min_context_slot: None,
+            },
+            with_context: None,
+            sort_results: None,
+        };
+
+        info!(
+            "GPA index: fetching pubkeys for program {:?}, discriminator {:?}",
+            program_id, discriminator
+        );
+        let indexed = match client.get_program_accounts_with_config(program_id, config).await {
+            Ok(accounts) => accounts,
+            Err(err) => {
+                error!(
+                    "GPA index failed: program {:?}, discriminator {:?}: {:?}",
+                    program_id, discriminator, err
+                );
+                return vec![];
+            }
+        };
+        let pubkeys: Vec<Pubkey> = indexed.into_iter().map(|(pubkey, _)| pubkey).collect();
+        info!(
+            "GPA index received: program {:?}, discriminator {:?}, accounts={}",
+            program_id,
+            discriminator,
+            pubkeys.len()
+        );
+
+        for chunk in pubkeys.chunks(100) {
+            let accounts = match client.get_multiple_accounts(chunk).await {
+                Ok(accounts) => accounts,
+                Err(err) => {
+                    error!(
+                        "GPA hydrate failed: program {:?}, discriminator {:?}, batch_size={}: {:?}",
+                        program_id,
+                        discriminator,
+                        chunk.len(),
+                        err
+                    );
+                    return vec![];
+                }
+            };
+            for (pubkey, account) in chunk.iter().copied().zip(accounts) {
+                if let Some(account) = account {
+                    all_accounts.push((pubkey, account));
+                }
+            }
+        }
+    }
+
+    all_accounts
+}
+
 async fn fetch_program_accounts_with_config(
     url: &str,
     program_id: &Pubkey,
@@ -129,14 +207,82 @@ pub async fn get_program_accounts(
             with_context: None,
             sort_results: None,
         };
-        let accounts = match rpc_client.get_program_accounts_with_config(program_id, config).await {
-            Ok(accounts) => accounts,
-            Err(_) => return Err(anyhow::anyhow!("FailedToGetProgramAccounts")),
-        };
+        info!(
+            "GPA snapshot: fetching full accounts for program {:?}, discriminator {:?}",
+            program_id, discriminator
+        );
+        let accounts = rpc_client
+            .get_program_accounts_with_config(program_id, config)
+            .await
+            .map_err(|err| anyhow::anyhow!("GPA request failed for {:?}: {:?}", program_id, err))?;
+        info!(
+            "GPA snapshot received: program {:?}, discriminator {:?}, accounts={}",
+            program_id,
+            discriminator,
+            accounts.len()
+        );
         all_accounts.extend(accounts);
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Ok(all_accounts)
+}
+
+type GpaSnapshot = (
+    orca::OrcaSwapV2GPAResult,
+    saros::SarosAmmGPAResult,
+    raydium::RaydiumCpmmGPAResult,
+    stabble::StabbleWeightedSwapGPAResult,
+    stabble::StabbleStableSwapGPAResult,
+    pump::PumpAmmGPAResult,
+    orca::OrcaGPAResult,
+    raydium::RaydiumAmmGPAResult,
+    raydium::RaydiumClmmGPAResult,
+    meteora::MeteoraDlmmGPAResult,
+    meteora::MeteoraDammV2GPAResult,
+    fusion::FusionAmmGPAResult,
+    saros::SarosDlmmGPAResult,
+);
+
+/// Chainstack-compatible initial snapshot. The two mandatory DEXs are the
+/// only ones hydrated and subscribed; all other DEX result sets stay empty.
+async fn get_chainstack_gpa(url: &str) -> anyhow::Result<GpaSnapshot> {
+    // Keep the original warmup behavior: the two mandatory DEX snapshots run
+    // concurrently, while the live streams are already active. This is the
+    // path that previously reached the opportunity loop successfully.
+    let pump_task = pump::spawn_pump_amm(url.to_string(), None);
+    let dlmm_task = meteora::spawn_meteora_dlmm(url.to_string(), None);
+    let (pump, dlmm) = tokio::join!(pump_task, dlmm_task);
+    let pump = pump.map_err(|err| anyhow::anyhow!("PumpSwap GPA task failed: {:?}", err))?;
+    let dlmm = dlmm.map_err(|err| anyhow::anyhow!("Meteora DLMM GPA task failed: {:?}", err))?;
+
+    if pump.pools.is_empty() {
+        anyhow::bail!("Chainstack initial snapshot returned no PumpSwap pools");
+    }
+    if dlmm.pools.is_empty() {
+        anyhow::bail!("Chainstack initial snapshot returned no Meteora DLMM pools");
+    }
+    info!(
+        "Chainstack initial snapshot: PumpSwap pools={}, Meteora DLMM pools={}, bin-array groups={}",
+        pump.pools.len(),
+        dlmm.pools.len(),
+        dlmm.bin_arrays.len()
+    );
+
+    Ok((
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        pump,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        dlmm,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    ))
 }
 
 pub async fn get_all_gpa(
@@ -305,7 +451,97 @@ pub struct GPAResult {
 //     }
 // }
 
-pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
+#[derive(Debug)]
+struct ChainstackAccountUpdate {
+    pubkey: Pubkey,
+    owner: Pubkey,
+    data: Vec<u8>,
+}
+
+async fn stream_chainstack_accounts(
+    ws_url: String,
+    tx: tokio::sync::mpsc::UnboundedSender<ChainstackAccountUpdate>,
+    tx_updates: Sender<MessagesV2>,
+) {
+    loop {
+        let client = match solana_client::nonblocking::pubsub_client::PubsubClient::new(&ws_url).await {
+            Ok(client) => client,
+            Err(err) => {
+                error!("Chainstack WebSocket connection failed: {:?}", err);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let config = || RpcProgramAccountsConfig {
+            // One broad subscription per mandatory DEX avoids consuming the
+            // provider's filter quota. The discriminator is parsed locally.
+            filters: None,
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                data_slice: None,
+                commitment: Some(CommitmentConfig::processed()),
+                min_context_slot: None,
+            },
+            with_context: Some(true),
+            sort_results: None,
+        };
+
+        let (mut pump_stream, _pump_unsubscribe) =
+            match client.program_subscribe(&dex::pump_amm::ID, Some(config())).await {
+                Ok(subscription) => subscription,
+                Err(err) => {
+                    error!("Chainstack PumpSwap subscription failed: {:?}", err);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+        let (mut dlmm_stream, _dlmm_unsubscribe) =
+            match client.program_subscribe(&dex::meteora_dlmm::ID, Some(config())).await {
+                Ok(subscription) => subscription,
+                Err(err) => {
+                    error!("Chainstack Meteora DLMM subscription failed: {:?}", err);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+        info!("Chainstack account streams active: PumpSwap + Meteora DLMM");
+        loop {
+            tokio::select! {
+                Some(response) = pump_stream.next() => {
+                    if let Some(data) = response.value.account.data.decode() {
+                        let pubkey = match Pubkey::from_str(&response.value.pubkey) {
+                            Ok(pubkey) => pubkey,
+                            Err(err) => { warn!("Invalid PumpSwap account pubkey: {:?}", err); continue; }
+                        };
+                        let slot = response.context.slot;
+                        if tx_updates.send(MessagesV2 { message: vec![Message { pubkey, owner: dex::pump_amm::ID, data: data.clone() }], slot }).is_err() { return; }
+                        let _ = tx.send(ChainstackAccountUpdate { pubkey, owner: dex::pump_amm::ID, data });
+                    }
+                }
+                Some(response) = dlmm_stream.next() => {
+                    if let Some(data) = response.value.account.data.decode() {
+                        let pubkey = match Pubkey::from_str(&response.value.pubkey) {
+                            Ok(pubkey) => pubkey,
+                            Err(err) => { warn!("Invalid Meteora DLMM account pubkey: {:?}", err); continue; }
+                        };
+                        let slot = response.context.slot;
+                        if tx_updates.send(MessagesV2 { message: vec![Message { pubkey, owner: dex::meteora_dlmm::ID, data: data.clone() }], slot }).is_err() { return; }
+                        let _ = tx.send(ChainstackAccountUpdate { pubkey, owner: dex::meteora_dlmm::ID, data });
+                    }
+                }
+                else => {
+                    warn!("Chainstack account stream closed; reconnecting");
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+pub async fn sync_gpa(url: &str, ws_url: &str, tx_updates: Sender<MessagesV2>) -> anyhow::Result<GPAResult> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(
         //goose_gama::GooseGammaGPAResult,
         orca::OrcaSwapV2GPAResult,
@@ -328,27 +564,9 @@ pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
         let url = url.to_string();
         async move {
             info!("GPA start");
-            if let Ok((
-                //result_goose_gamma,
-                result_orca_swap_v2,
-                result_saros_amm,
-                result_raydium_cpmm,
-                //result_lifinity,
-                result_stabble_weighted_swap,
-                result_stabble_stable_swap,
-                result_pump_amm,
-                result_orca,
-                result_raydium_amm,
-                result_raydium_clmm,
-                result_meteroa_dlmm,
-                result_meteora_damm_v2,
-                result_fusion,
-                result_saros,
-            )) = get_all_gpa(&url).await
-            {
-                info!("GPA Ok");
-                if let Err(e) = tx
-                    .send((
+            loop {
+                match get_chainstack_gpa(&url).await {
+                    Ok((
                         //result_goose_gamma,
                         result_orca_swap_v2,
                         result_saros_amm,
@@ -364,13 +582,37 @@ pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
                         result_meteora_damm_v2,
                         result_fusion,
                         result_saros,
-                    ))
-                    .await
-                {
-                    error!("Failed to send GPA result: {:?}", e);
+                    )) => {
+                        info!("GPA Ok");
+                        if let Err(e) = tx
+                            .send((
+                                //result_goose_gamma,
+                                result_orca_swap_v2,
+                                result_saros_amm,
+                                result_raydium_cpmm,
+                                //result_lifinity,
+                                result_stabble_weighted_swap,
+                                result_stabble_stable_swap,
+                                result_pump_amm,
+                                result_orca,
+                                result_raydium_amm,
+                                result_raydium_clmm,
+                                result_meteroa_dlmm,
+                                result_meteora_damm_v2,
+                                result_fusion,
+                                result_saros,
+                            ))
+                            .await
+                        {
+                            error!("Failed to send GPA result: {:?}", e);
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        error!("GPA initial snapshot unavailable: {:?}; retrying in 10s", err);
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
                 }
-            } else {
-                panic!("GPA error");
             }
         }
     });
@@ -446,27 +688,16 @@ pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
 
     let token_mints: HashSet<Pubkey> = HashSet::new();
 
-    let ctx = zmq2::Context::new();
-    let socket = ctx.socket(zmq2::SUB).unwrap();
-    socket
-        .connect("ipc:///tmp/accounts_zmq_v2.sock")
-        .or_panic("FailedToConnect");
-    let _ = socket.set_subscribe(b"");
+    let (tx_socket, mut rx_socket) = tokio::sync::mpsc::unbounded_channel::<ChainstackAccountUpdate>();
 
-    let (tx_socket, mut rx_socket) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let _ = std::thread::spawn(move || loop {
-        let result = socket.recv_bytes(0);
-        if let Ok(msg) = result {
-            let _ = tx_socket.send(msg);
-        }
-    });
-
-    // let mut socket = zeromq::SubSocket::new();
-    // socket
-    //     .connect("ipc:///tmp/accounts_zmq_v2.sock")
-    //     .await
-    //     .or_panic("FailedToConnect");
-    // socket.subscribe("").await.or_panic("FailedToSubscribe");
+    // Start the live streams while the initial GPA is loading. This preserves
+    // the previously working warmup behavior: account updates can arrive and
+    // queue while the HTTP snapshot is slow or retrying.
+    tokio::spawn(stream_chainstack_accounts(
+        ws_url.to_string(),
+        tx_socket.clone(),
+        tx_updates.clone(),
+    ));
 
     loop {
         select! {
@@ -634,15 +865,10 @@ pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
 
                 break;
             }
-            // zeromq
+            // Chainstack programSubscribe
             Some(msg) = rx_socket.recv() => {
-                    let data = deserialize_v2(msg);
-                    let data = data.map_err(|e| {
-                        error!("Failed to deserialize message: {:?}", e);
-                        anyhow::format_err!("Failed to deserialize message: {:?}", e)
-                    })?;
-
-                    data.message.into_iter().for_each(|msg| {
+                    {
+                        let msg = msg;
                         if msg.owner == dex::pump_amm::ID {
                             let res = pump::process_pump_amm(msg.pubkey, msg.data.as_slice(),
                                 &mut pump_amm_map,
@@ -805,7 +1031,7 @@ pub async fn sync_gpa(url: &str) -> anyhow::Result<GPAResult> {
                                 error!("Failed to process saros dlmm: {:?}", e);
                             }
                         }
-                    });
+                    }
             }
         }
     }
@@ -963,9 +1189,8 @@ impl GPAResult {
                                     + fee_config.flat_fees.creator_fee_bps
                             } else if let Some(mint_supply) = self.pump_amm_pool_to_mint_supply.get(pubkey) {
                                 //*mint_supply
-                                let mc =
-                                    dex::pump_amm::pool_market_cap(*mint_supply, *base as u128, *quote as u128)
-                                        .unwrap_or(0);
+                                let mc = dex::pump_amm::pool_market_cap(*mint_supply, *base as u128, *quote as u128)
+                                    .unwrap_or(0);
                                 let fees = fee_config.get_fees(is_pump, mc);
                                 fees.lp_fee_bps + fees.creator_fee_bps + fees.protocol_fee_bps
                             } else {
@@ -980,12 +1205,9 @@ impl GPAResult {
 
                                 self.pump_amm_pool_to_mint_supply.insert(*pubkey, mint.supply as u128);
 
-                                let mc = dex::pump_amm::pool_market_cap(
-                                    mint.supply as u128,
-                                    *base as u128,
-                                    *quote as u128,
-                                )
-                                .unwrap_or(0);
+                                let mc =
+                                    dex::pump_amm::pool_market_cap(mint.supply as u128, *base as u128, *quote as u128)
+                                        .unwrap_or(0);
 
                                 let fees = fee_config.get_fees(is_pump, mc);
                                 fees.lp_fee_bps + fees.creator_fee_bps + fees.protocol_fee_bps
@@ -1419,13 +1641,14 @@ impl GPAResult {
                                 + fee_config.flat_fees.creator_fee_bps
                         } else if let Some(mint_supply) = self.pump_amm_pool_to_mint_supply.get(pubkey) {
                             //*mint_supply
-                            let mc = dex::pump_amm::pool_market_cap(*mint_supply, base as u128, quote as u128)
-                                .unwrap_or(0);
+                            let mc =
+                                dex::pump_amm::pool_market_cap(*mint_supply, base as u128, quote as u128).unwrap_or(0);
                             let fees = fee_config.get_fees(is_pump, mc);
                             fees.lp_fee_bps + fees.creator_fee_bps + fees.protocol_fee_bps
                         } else {
                             fee_config
-                                .fee_tiers.first()
+                                .fee_tiers
+                                .first()
                                 .map(|tier| {
                                     tier.fees.lp_fee_bps + tier.fees.creator_fee_bps + tier.fees.protocol_fee_bps
                                 })

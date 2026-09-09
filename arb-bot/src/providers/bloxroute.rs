@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::{sync::atomic::AtomicU64, time::Instant};
 use utils::transaction::check_transaction_size;
 
-use crate::providers::amount_for_flashloan;
 use crate::OptimizeResult;
 use arb_core::fee::calculate_max_fee;
 use config::CONFIG as cfg;
@@ -24,7 +23,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use utils::constants::{ALLOWED_TOKEN_2022, WSOL};
 use utils::now;
 
-use super::{Provider, SetupResult};
+use super::{require_min_net_profit, Provider, SetupResult};
 
 #[derive(Clone, Debug)]
 pub struct ProviderBloxroute {
@@ -82,18 +81,10 @@ impl Provider for ProviderBloxroute {
         let token_ata_wsol = setup.token_ata_wsol;
         //let regions = setup.regions;
 
-        let mut mint_to_ata = setup.mint_to_ata;
-
         let mut balance = setup.balance;
         let mut blockhash = setup.blockhash;
         let mut rx_balance = setup.tx_balance.subscribe();
         let mut rx_blockhash = setup.tx_blockhash.subscribe();
-
-        let flashloan_keys = setup.flashloan_keys;
-        let (pool, pool_ata) = match flashloan_keys.get(&WSOL) {
-            Some((pool, pool_ata)) => (*pool, *pool_ata),
-            None => panic!("No flashloan keys found for WSOL"),
-        };
 
         let mut allowed_token2022 = AHashSet::from_iter(ALLOWED_TOKEN_2022.iter().cloned());
 
@@ -139,7 +130,6 @@ impl Provider for ProviderBloxroute {
 
                         let calculators = opportunity.calculators;
 
-                        let mint_pair_route = opportunity.mint_pair_route.iter().collect::<Vec<_>>();
                         if optimize.diff < filter {
                             warn!(
                                 "Optimize diff: {} before: {}, filter: {}",
@@ -150,15 +140,13 @@ impl Provider for ProviderBloxroute {
 
                         let mut builder = arb_core::instruction::IxBuilder::new(keypair.pubkey());
 
-                        let preparation = match arb_core::arbitrage::process_arbitrage_v6(
+                        let preparation = match super::prepare_executor_v2(
                             &calculators,
-                            &WSOL,
-                            &mut builder,
-                            &mut mint_to_ata,
-                            &mint_pair_route,
+                            keypair.pubkey(),
+                            optimize.diff,
+                            &optimize.amounts,
+                            &optimize.remaining_accounts,
                             &allowed_token2022,
-                            optimize.amounts,
-                            optimize.remaining_accounts,
                         ) {
                             Ok(preparation) => preparation,
                             Err(err) => {
@@ -199,22 +187,21 @@ impl Provider for ProviderBloxroute {
                             }
                         };
 
-                        let use_flash_loan = optimize.amount >= cfg.arbitrage.min_amount_for_flashloan;
+                        let net_profit = match require_min_net_profit(optimize.diff, tip_result.total_tip) {
+                            Ok(net_profit) => net_profit,
+                            Err(err) => {
+                                debug!("Bloxroute net-profit reject: {}", err);
+                                continue 'outer;
+                            }
+                        };
+                        debug!(
+                            "Bloxroute economics: gross={}, cost={}, net={}",
+                            optimize.diff, tip_result.total_tip, net_profit
+                        );
 
                         let bloxroute_tip = tip_result.provider_tip;
 
-                        if use_flash_loan {
-                            let amount = amount_for_flashloan(optimize.amount);
-                            builder.push_ix(preparation.to_floashloan_ix(
-                                amount,
-                                tip_result.total_tip,
-                                pool_ata,
-                                pool,
-                                token_ata_wsol,
-                            ));
-                        } else {
-                            builder.push_ix(preparation.to_instruction(tip_result.total_tip));
-                        }
+                        builder.push_ix(preparation.to_instruction(tip_result.total_tip));
 
                         if cfg.bloxroute.simulate {
                             let start = Instant::now();

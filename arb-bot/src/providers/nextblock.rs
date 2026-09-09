@@ -13,7 +13,6 @@ use std::{sync::atomic::AtomicU64, time::Instant};
 use tokio::sync::broadcast::Receiver;
 use utils::transaction::check_transaction_size;
 
-use crate::providers::amount_for_flashloan;
 use crate::OptimizeResult;
 use arb_core::fee::calculate_max_fee;
 use config::providers::NextblockConfig;
@@ -22,10 +21,10 @@ use solana_sdk::signature::Signer;
 use tokio::select;
 use tokio::sync::mpsc::UnboundedReceiver;
 use utils::base64::b64_encode;
-use utils::constants::{ALLOWED_TOKEN_2022, WSOL};
+use utils::constants::ALLOWED_TOKEN_2022;
 use utils::now;
 
-use super::{Provider, SetupResult};
+use super::{require_min_net_profit, Provider, SetupResult};
 
 #[derive(Clone, Debug)]
 pub struct ProviderNextblock {
@@ -76,21 +75,12 @@ impl Provider for ProviderNextblock {
         };
 
         let keypair = setup.keypair;
-        let token_ata_wsol = setup.token_ata_wsol;
         //let regions = setup.regions;
-
-        let mut mint_to_ata = setup.mint_to_ata;
 
         let mut balance = setup.balance;
         let mut blockhash = setup.blockhash;
         let mut rx_balance = setup.tx_balance.subscribe();
         let mut rx_blockhash = setup.tx_blockhash.subscribe();
-
-        let flashloan_keys = setup.flashloan_keys;
-        let (pool, pool_ata) = match flashloan_keys.get(&WSOL) {
-            Some((pool, pool_ata)) => (*pool, *pool_ata),
-            None => panic!("No flashloan keys found for WSOL"),
-        };
 
         let alt = setup.alt;
 
@@ -153,7 +143,6 @@ impl Provider for ProviderNextblock {
 
                             let calculators = opportunity.calculators;
 
-                            let mint_pair_route = opportunity.mint_pair_route.iter().collect::<Vec<_>>();
                             if optimize.diff < filter {
                                 warn!("Optimize diff: {} before: {}, filter: {}", optimize.diff, opportunity.diff, filter);
                                 continue 'outer
@@ -161,7 +150,14 @@ impl Provider for ProviderNextblock {
 
                             let mut builder = arb_core::instruction::IxBuilder::new(keypair.pubkey());
 
-                            let preparation = match arb_core::arbitrage::process_arbitrage_v6(&calculators, &WSOL, &mut builder, &mut mint_to_ata, &mint_pair_route, &allowed_token2022, optimize.amounts, optimize.remaining_accounts) {
+                            let preparation = match super::prepare_executor_v2(
+                                &calculators,
+                                keypair.pubkey(),
+                                optimize.diff,
+                                &optimize.amounts,
+                                &optimize.remaining_accounts,
+                                &allowed_token2022,
+                            ) {
                                 Ok(preparation) => preparation,
                                 Err(err) => {
                                     warn!("Error processing arbitrage: {:?} pools: {:?}, types: {:?}, volume: {:?}", err, 
@@ -217,25 +213,31 @@ impl Provider for ProviderNextblock {
                                 }
                             };
 
-                            let use_flash_loan = optimize.amount >= cfg.arbitrage.min_amount_for_flashloan;
+                            let net_profit = match require_min_net_profit(optimize.diff, tip_result.total_tip) {
+                                Ok(net_profit) => net_profit,
+                                Err(err) => {
+                                    debug!("Nextblock net-profit reject: {}", err);
+                                    continue 'outer;
+                                }
+                            };
+                            debug!(
+                                "Nextblock economics: gross={}, cost={}, net={}",
+                                optimize.diff,
+                                tip_result.total_tip,
+                                net_profit
+                            );
 
                             let tip_result_cu = tip_result.compute_unit_limit as u32;
 
                             //let simulated_cu = 0;
 
-                            if use_flash_loan {
-                                let amount = amount_for_flashloan(optimize.amount);
-                                builder.push_ix(preparation.to_floashloan_ix(amount, tip_result.total_tip, pool_ata, pool, token_ata_wsol));
-                            } else {
-                                builder.push_ix(preparation.to_instruction(tip_result.total_tip));
-                            }
+                            builder.push_ix(preparation.to_instruction(tip_result.total_tip));
 
                             if cfg.nextblock.simulate {
                                 let start = Instant::now();
                                 let mut simulation_builder = builder.clone();
                                 simulation_builder.add_compute_unit_limit(tip_result.compute_unit_limit as u32);
                                 simulation_builder.add_compute_unit_price((tip_result.compute_unit_price).min(1_200_000));
-                                //simulation_builder.push_ix(preparation.to_floashloan_ix(amount, tip_result.total_tip, pool_ata, pool, token_ata_wsol));
                                 simulation_builder.add_nextblock_tip_ix(tip_result.provider_tip);
 
                                 let txn = simulation_builder.prepare_tx(&keypair, &alts, blockhash);
@@ -281,7 +283,6 @@ impl Provider for ProviderNextblock {
 
                             builder.add_compute_unit_limit(tip_result.compute_unit_limit as u32);
                             builder.add_compute_unit_price(tip_result.compute_unit_price);
-                            //builder.push_ix(preparation.to_floashloan_ix(amount, tip_result.total_tip, pool_ata, pool, token_ata_wsol ));
                             builder.add_nextblock_tip_ix(tip_result.provider_tip);
                             let txn = builder.prepare_tx(&keypair, &alts, blockhash);
                                 if let Ok(txn) = txn {
@@ -314,7 +315,7 @@ impl Provider for ProviderNextblock {
                                     if let Ok(response) = result {
                                         info!("NB: {:?}", response);
                                     }
-                                    
+
                                 }
                                 buffer.clear();
                             }

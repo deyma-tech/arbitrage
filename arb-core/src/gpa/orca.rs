@@ -9,6 +9,7 @@ use utils::pool::{Pool, PoolType};
 
 use crate::gpa::PoolToCalculator;
 
+#[derive(Default)]
 pub struct OrcaGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::orca::OrcaWhirlpool>,
@@ -17,7 +18,7 @@ pub struct OrcaGPAResult {
     pub pool_to_oracle: HashMap<Pubkey, dex::orca::Oracle>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct OrcaSwapV2GPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub markets: HashMap<Pubkey, dex::orca_swap_v2::accounts::Market>,

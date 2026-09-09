@@ -9,13 +9,13 @@ use utils::pool::{Pool, PoolType};
 
 use crate::gpa::PoolToCalculator;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StabbleStableSwapGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::stabble_stable_swap::PoolSwap>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StabbleWeightedSwapGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::stabble_weighted_swap::accounts::PoolWeightedSwap>,

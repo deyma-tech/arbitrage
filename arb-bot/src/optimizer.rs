@@ -21,6 +21,11 @@ pub fn spawn_optimization(
     crossbeam_channel::Receiver<(OpportunityWithCalculators, OptimizeResult)>,
 )> {
     let optimization_threads = cfg.arbitrage.optimization_threads;
+    let minimum_profit = minimum_filter.max(cfg.arbitrage.min_profit_lamports).max(
+        cfg.arbitrage
+            .estimated_execution_cost_lamports
+            .saturating_add(cfg.arbitrage.min_net_profit_lamports),
+    );
     let mut tx_arbitrages = Vec::with_capacity(optimization_threads);
 
     let (tx_final_arbitrage, rx_final_arbitrage) =
@@ -63,7 +68,7 @@ pub fn spawn_optimization(
                     &WSOL,
                 ) {
                     Ok(optimize_result) => {
-                        if optimize_result.diff > minimum_filter
+                        if passes_profit_filter(&optimize_result, minimum_profit)
                             && optimize_result.amounts.len() >= 2
                             && optimize_result.remaining_accounts.len() >= 2
                         {
@@ -81,6 +86,36 @@ pub fn spawn_optimization(
         });
     } // for
     Ok((tx_arbitrages, rx_final_arbitrage))
+}
+
+#[inline]
+fn passes_profit_filter(optimize_result: &OptimizeResult, minimum_profit: u64) -> bool {
+    optimize_result.diff >= minimum_profit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{passes_profit_filter, OptimizeResult};
+
+    #[test]
+    fn rejects_profit_below_dust_threshold() {
+        let result = OptimizeResult {
+            diff: 99_999,
+            ..OptimizeResult::default()
+        };
+
+        assert!(!passes_profit_filter(&result, 100_000));
+    }
+
+    #[test]
+    fn accepts_profit_at_dust_threshold() {
+        let result = OptimizeResult {
+            diff: 100_000,
+            ..OptimizeResult::default()
+        };
+
+        assert!(passes_profit_filter(&result, 100_000));
+    }
 }
 
 /// With optionals
@@ -244,12 +279,12 @@ pub fn spawn_filter_arbitrages_v8(
         let mut zero = 0;
         loop {
             //let _size = rx_final_arbitrage.blocking_recv_many(&mut buffer, 100);
-            if !rx_final_arbitrage.is_empty() {
-                while let Ok((opportunity, optimize_result)) = rx_final_arbitrage.try_recv() {
-                    buffer.push((opportunity, optimize_result));
-                }
-            } else {
-                continue;
+            let Ok((opportunity, optimize_result)) = rx_final_arbitrage.recv() else {
+                break;
+            };
+            buffer.push((opportunity, optimize_result));
+            while let Ok((opportunity, optimize_result)) = rx_final_arbitrage.try_recv() {
+                buffer.push((opportunity, optimize_result));
             }
 
             let timestamp = now::as_secs();

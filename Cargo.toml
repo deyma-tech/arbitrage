@@ -10,7 +10,8 @@ members = [
     "config",
     "validators",
     "nextblock_protos",
-    "nextblock-client"
+    "nextblock-client",
+    "arb_executor_v2"
 ]
 resolver = "2"
 

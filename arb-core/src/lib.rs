@@ -1,6 +1,7 @@
 pub mod arbitrage;
 pub mod calculator;
 pub mod compute_units;
+pub mod executor_v2;
 pub mod fee;
 pub mod fetcher;
 pub mod gpa;

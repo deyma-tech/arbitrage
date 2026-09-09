@@ -8,13 +8,14 @@ use utils::pool::{Pool, PoolType};
 
 use crate::gpa::PoolToCalculator;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SarosAmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub markets: HashMap<Pubkey, dex::saros_amm::accounts::Market>,
     pub authorities: HashMap<Pubkey, Pubkey>,
 }
 
+#[derive(Default)]
 pub struct SarosDlmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::saros_dlmm::Pair>,

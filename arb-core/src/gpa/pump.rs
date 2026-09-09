@@ -7,7 +7,7 @@ use utils::pool::{Pool, PoolType};
 
 use crate::gpa::PoolToCalculator;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PumpAmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::pump_amm::Pool>,
@@ -59,7 +59,16 @@ pub fn spawn_pump_amm(
         let result = if let Some(rpc_cfg) = cfg_opt {
             crate::gpa::fetch_program_accounts_with_config(&url, &dex::pump_amm::ID, rpc_cfg).await
         } else {
-            crate::gpa::fetch_program_accounts(&url, &dex::pump_amm::ID).await
+            crate::gpa::fetch_program_accounts_by_discriminators(
+                &url,
+                &dex::pump_amm::ID,
+                &[
+                    dex::pump_amm::POOL_DISCRIMINATOR,
+                    dex::pump_amm::GLOBAL_CONFIG_DISCRIMINATOR,
+                    dex::pump_amm::FEE_DISCRIMINATOR,
+                ],
+            )
+            .await
         };
         let mut pump_amm_result = PumpAmmGPAResult {
             pool_type_and_pubkey: Default::default(),

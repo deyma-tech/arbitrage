@@ -33,6 +33,7 @@ pub struct ArbitrageCompressedInstructionInput {
     pub ixs_data: Vec<Vec<u8>>,
     pub accounts: Vec<AccountMeta>,
     pub accounts_indices: Vec<Vec<u8>>,
+    direct_instruction: Option<Instruction>,
 }
 
 impl ArbitrageCompressedInstructionInput {
@@ -43,6 +44,19 @@ impl ArbitrageCompressedInstructionInput {
             ixs_data: vec![],
             accounts,
             accounts_indices: vec![],
+            direct_instruction: None,
+        }
+    }
+
+    /// Stores an already-built instruction for an isolated executor program.
+    /// The legacy compressed ABI must not rewrite its program ID or payload.
+    pub fn from_direct_instruction(instruction: Instruction) -> Self {
+        Self {
+            tag: 0,
+            ixs_data: vec![],
+            accounts: instruction.accounts.clone(),
+            accounts_indices: vec![],
+            direct_instruction: Some(instruction),
         }
     }
     pub fn push(&mut self, ix: Instruction) {
@@ -73,6 +87,9 @@ impl ArbitrageCompressedInstructionInput {
     }
 
     pub fn to_instruction(&self, amount: u64) -> Instruction {
+        if let Some(instruction) = &self.direct_instruction {
+            return instruction.clone();
+        }
         let mut data = vec![4_u8];
         data.extend(amount.to_le_bytes());
         for (idx, ix_data) in self.ixs_data.iter().enumerate() {
@@ -99,6 +116,10 @@ impl ArbitrageCompressedInstructionInput {
         pool: Pubkey,
         ata_wsol: Pubkey,
     ) -> Instruction {
+        assert!(
+            self.direct_instruction.is_none(),
+            "direct executor instructions cannot be wrapped in a flashloan"
+        );
         let ix = self.to_instruction(amount);
         let mut accounts = vec![
             AccountMeta::new(pool_ata, false),

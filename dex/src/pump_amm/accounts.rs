@@ -35,7 +35,10 @@ pub struct Pool {
     pub pool_quote_token_account: Pubkey, // 32
     pub lp_supply: u64,                   // 8
     pub coin_creator: Pubkey,             // 32
-                                          // total size: 8 + 1 + 2 + 32 + 32 + 32 + 32 + 32 + 32 + 8 + 32 =  256
+    /// New PumpSwap fee ABI flag at byte 244 of the pool account.
+    pub is_mayhem: bool,
+    pub is_cashback: bool,
+    // total size: 8 + 1 + 2 + 32 + 32 + 32 + 32 + 32 + 32 + 8 + 32 =  256
 }
 
 impl Pool {
@@ -69,6 +72,8 @@ impl Pool {
                 )
                 .unwrap_or(pubkey!("11111111111111111111111111111111"))
             },
+            is_cashback: data.get(244).copied().unwrap_or(0) != 0,
+            is_mayhem: data.get(243).copied().unwrap_or(0) != 0,
         };
         Ok(pool)
     }
@@ -441,6 +446,7 @@ pub struct GlobalConfig {
     pub protocol_fee_basis_points: u64,
     pub disable_flags: u8,
     pub protocol_fee_recipients: [Pubkey; 8],
+    pub reserved_protocol_fee_recipients: [Pubkey; 8],
 }
 
 impl GlobalConfig {
@@ -460,6 +466,26 @@ impl GlobalConfig {
         let recipients = TryInto::<[Pubkey; 8]>::try_into(pubkeys);
         let recipients =
             recipients.map_err(|_| anyhow::anyhow!("Pump AMM GlobalConfig deser failed: protocol_fee_recipients."))?;
+
+        let mut reserved_recipients = [Pubkey::default(); 8];
+        if data.len() >= 385 + 32 {
+            reserved_recipients[0] = Pubkey::new_from_array(
+                data[385..417]
+                    .try_into()
+                    .context("Pump AMM GlobalConfig deser failed: reserved protocol recipient")?,
+            );
+            for (index, recipient) in reserved_recipients.iter_mut().enumerate().skip(1) {
+                let start = 418 + (index - 1) * 32;
+                let end = start + 32;
+                if end <= data.len() {
+                    *recipient = Pubkey::new_from_array(
+                        data[start..end]
+                            .try_into()
+                            .context("Pump AMM GlobalConfig deser failed: reserved protocol recipients")?,
+                    );
+                }
+            }
+        }
 
         let cfg = GlobalConfig {
             discriminator: data[0..8]
@@ -482,6 +508,7 @@ impl GlobalConfig {
             ),
             disable_flags: data[56],
             protocol_fee_recipients: recipients,
+            reserved_protocol_fee_recipients: reserved_recipients,
         };
         Ok(cfg)
     }

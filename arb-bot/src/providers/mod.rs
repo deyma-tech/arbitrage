@@ -1,16 +1,18 @@
 use ahash::{AHashMap, AHashSet, HashMap};
 use arb_core::arbitrage::OpportunityWithCalculators;
+use arb_core::calculator::CalculatorEnum;
+use arb_core::instruction::ArbitrageCompressedInstructionInput;
 
-use log::info;
+use log::{info, warn};
 use solana_program::pubkey::Pubkey;
+use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::priority_fee::spawn_get_priority_fees;
 use crate::process::get_channel_for_blockhash;
-use crate::rebalancer::rebalance;
-use crate::setup::{fetch_alt, fetch_balance, fetch_blockhash, fetch_flashloan_keys};
+use crate::setup::{fetch_balance, fetch_blockhash, fetch_flashloan_keys};
 use crate::OptimizeResult;
 use config::{CONFIG as cfg, DEFAULT_EXECUTION_THREADS};
 use solana_sdk::hash::Hash;
@@ -19,6 +21,34 @@ use solana_sdk::signature::{Keypair, Signer};
 use spl_associated_token_account::get_associated_token_address;
 use tokio::sync::mpsc::UnboundedReceiver;
 use utils::constants::WSOL;
+
+/// Build the only execution ABI enabled by this Chainstack deployment.
+/// Unsupported venues/leg counts are rejected instead of falling back to the
+/// legacy generic wrapper, whose program ID is not trusted for live funds.
+pub fn prepare_executor_v2(
+    calculators: &[Box<CalculatorEnum>],
+    payer: Pubkey,
+    minimum_profit: u64,
+    amounts: &[u64],
+    remaining_accounts: &[Vec<Pubkey>],
+    allowed_token2022: &AHashSet<Pubkey>,
+) -> anyhow::Result<ArbitrageCompressedInstructionInput> {
+    if cfg.arbitrage.enable_flashloan {
+        anyhow::bail!("executor V2 usa WSOL de la wallet; flashloan sigue deshabilitado");
+    }
+    let executor_program = Pubkey::from_str(&cfg.arb_executor_v2_program_id)
+        .map_err(|err| anyhow::anyhow!("ARB_EXECUTOR_V2_PROGRAM_ID inválido: {err}"))?;
+    arb_core::arbitrage::process_executor_v2(
+        calculators,
+        &WSOL,
+        amounts,
+        remaining_accounts,
+        payer,
+        executor_program,
+        minimum_profit,
+        allowed_token2022,
+    )
+}
 
 pub mod jito;
 pub use jito::ProviderJito;
@@ -77,6 +107,10 @@ impl ProviderType {
 }
 
 pub async fn get_providers() -> Vec<ProviderType> {
+    if !cfg.enable_execution && cfg.providers != "log" {
+        warn!("Execution disabled; forcing log provider");
+        return vec![ProviderType::Log(ProviderLog::new().await)];
+    }
     let providers = cfg.providers.clone();
     if providers == "jjn" {
         return vec![
@@ -99,6 +133,43 @@ pub async fn get_providers() -> Vec<ProviderType> {
         result.push(provider);
     }
     result
+}
+
+/// Returns modeled profit after the provider's calculated total cost.
+/// `total_cost` includes provider tip, priority fee, and base transaction fee.
+pub(super) fn require_min_net_profit(gross_profit: u64, total_cost: u64) -> anyhow::Result<u64> {
+    let net_profit = net_profit_after_cost(gross_profit, total_cost)
+        .ok_or_else(|| anyhow::anyhow!("GrossProfitBelowExecutionCost"))?;
+    if net_profit < cfg.arbitrage.min_net_profit_lamports {
+        anyhow::bail!(
+            "NetProfitBelowMinimum: gross={}, cost={}, net={}, minimum={}",
+            gross_profit,
+            total_cost,
+            net_profit,
+            cfg.arbitrage.min_net_profit_lamports
+        );
+    }
+    Ok(net_profit)
+}
+
+#[inline]
+fn net_profit_after_cost(gross_profit: u64, total_cost: u64) -> Option<u64> {
+    gross_profit.checked_sub(total_cost)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::net_profit_after_cost;
+
+    #[test]
+    fn net_profit_cannot_underflow() {
+        assert_eq!(net_profit_after_cost(1_000, 1_001), None);
+    }
+
+    #[test]
+    fn net_profit_subtracts_provider_cost() {
+        assert_eq!(net_profit_after_cost(10_000_000, 1_005_000), Some(8_995_000));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -133,19 +204,49 @@ pub trait Provider {
         //let regions = get_region();
 
         // let record_account = get_record_account(&keypair.pubkey());
-        let balance = fetch_balance().await;
-        let blockhash = fetch_blockhash().await;
-        let flashloan_keys = fetch_flashloan_keys().await;
-        let alt = fetch_alt().await;
+        let balance = if cfg.enable_execution {
+            fetch_balance().await
+        } else {
+            // Dry-run does not use balance-based fee or capital guards.
+            info!("Execution disabled; skipping wallet balance RPC setup");
+            0
+        };
+        let needs_blockhash = cfg.enable_execution || cfg.arbitrage.dry_run_simulate;
+        let (blockhash, tx_blockhash) = if needs_blockhash {
+            let blockhash = fetch_blockhash().await;
+            let tx_blockhash = get_channel_for_blockhash(cfg.blockhash_and_simulate_rpc.clone()).await;
+            (blockhash, tx_blockhash)
+        } else {
+            // Dry-run never builds or submits a transaction, so there is no
+            // reason to query or refresh blockhashes against the RPC.
+            info!("Execution disabled; skipping blockhash RPC setup");
+            let (tx_blockhash, _) = tokio::sync::broadcast::channel::<Hash>(100);
+            (Hash::default(), tx_blockhash)
+        };
+        let flashloan_keys = if cfg.arbitrage.enable_flashloan {
+            fetch_flashloan_keys().await
+        } else {
+            info!("Flashloan disabled; not loading flashloan accounts");
+            AHashMap::default()
+        };
+        // The old hardcoded ALT is a placeholder and is not part of the
+        // verified executor V2 ABI. Keep the setup empty; callers may still
+        // add validated route-specific tables from the optimizer.
+        let alt = AddressLookupTableAccount {
+            key: Pubkey::default(),
+            addresses: vec![],
+        };
         // TODO - true need to go into config !!!!
         let turn_on_priority_fee = cfg.providers.as_str() == "helius_swqos" || cfg.providers.as_str() == "allh+";
-        let tx_balance = rebalance();
+        // The legacy rebalancer can close/recreate the WSOL ATA and submit a
+        // native transfer. Executor V2 is wallet-funded, so do not start that
+        // side-effecting task; providers use the initial balance snapshot.
+        let (tx_balance, _) = tokio::sync::broadcast::channel(1);
         let tx_priority_fee = if turn_on_priority_fee {
             Some(spawn_get_priority_fees())
         } else {
             None
         };
-        let tx_blockhash = get_channel_for_blockhash(cfg.blockhash_and_simulate_rpc.clone()).await;
 
         info!("ALT: {:?}", alt.addresses.len());
         info!("wallet: {}", keypair.pubkey());
@@ -210,7 +311,13 @@ impl Provider for ProviderType {
             ProviderType::JitoQuicknode(_) => cfg.jito_quicknode.execution_threads,
             ProviderType::Bloxroute(_) => cfg.bloxroute.execution_threads,
             ProviderType::Nextblock(_) => cfg.nextblock.execution_threads,
-            ProviderType::Log(_) => DEFAULT_EXECUTION_THREADS, // default thread count for Log provider
+            ProviderType::Log(_) => {
+                if cfg.enable_execution {
+                    DEFAULT_EXECUTION_THREADS
+                } else {
+                    1
+                }
+            }
         }
     }
 

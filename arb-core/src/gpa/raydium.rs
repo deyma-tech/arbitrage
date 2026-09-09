@@ -12,11 +12,13 @@ use crate::gpa::PoolToCalculator;
 
 const SIZE_AMM_INFO: usize = size_of::<dex::raydium_amm::AmmInfo>();
 
+#[derive(Default)]
 pub struct RaydiumAmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::raydium_amm::AmmInfo>,
 }
 
+#[derive(Default)]
 pub struct RaydiumClmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::raydium_clmm::PoolState>,
@@ -25,7 +27,7 @@ pub struct RaydiumClmmGPAResult {
     pub bitmap_extensions: HashMap<Pubkey, (Pubkey, dex::raydium_clmm::TickArrayBitmapExtension)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RaydiumCpmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::raydium_cpmm::PoolState>,

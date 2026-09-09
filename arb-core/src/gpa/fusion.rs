@@ -8,6 +8,7 @@ use utils::pool::{Pool, PoolType};
 
 use crate::gpa::PoolToCalculator;
 
+#[derive(Default)]
 pub struct FusionAmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::fusion_amm::FusionPoolWhirlpool>,

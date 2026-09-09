@@ -8,7 +8,7 @@ use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use spl_associated_token_account::get_associated_token_address;
-use utils::constants::{ADDRESS_LOOKUP_TABLE, FLASHLOAN_ID};
+use utils::constants::FLASHLOAN_ID;
 use utils::safe::ResultExt;
 
 use crate::optimizer::UpdateAlts;
@@ -69,17 +69,6 @@ pub async fn fetch_flashloan_keys() -> AHashMap<Pubkey, (Pubkey, Pubkey)> {
         panic!("No flashloan pools found");
     }
     flashloan_keys
-}
-
-pub async fn fetch_alt() -> AddressLookupTableAccount {
-    let rpc_client = RpcClient::new(cfg.rpc.clone());
-    let alt = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE).await;
-    match alt {
-        Ok(data) => {
-            arb_core::table::get_address_lookup_table(&data, ADDRESS_LOOKUP_TABLE).or_panic("FailedToDeserializeALT")
-        }
-        Err(_) => panic!("FailedToLoadALT"),
-    }
 }
 
 pub async fn fetch_blockhash() -> Hash {

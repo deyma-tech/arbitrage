@@ -442,6 +442,35 @@ pub fn process_arbitrage_v6(
     Ok(preparation)
 }
 
+/// Prepares the fixed two-leg wallet-funded ABI for the isolated executor.
+/// This path intentionally does not create intermediate ATAs or use the
+/// legacy compressed wrapper program.
+#[allow(clippy::too_many_arguments)]
+pub fn process_executor_v2(
+    partial_data: &[Box<CalculatorEnum>],
+    starting_mint: &Pubkey,
+    amounts: &[u64],
+    remaining_accounts: &[Vec<Pubkey>],
+    payer: Pubkey,
+    executor_program: Pubkey,
+    minimum_profit: u64,
+    allowed_token2022: &AHashSet<Pubkey>,
+) -> anyhow::Result<ArbitrageCompressedInstructionInput> {
+    let instruction = crate::executor_v2::build_instruction(
+        partial_data,
+        starting_mint,
+        amounts,
+        remaining_accounts,
+        payer,
+        executor_program,
+        minimum_profit,
+        allowed_token2022,
+    )?;
+    Ok(ArbitrageCompressedInstructionInput::from_direct_instruction(
+        instruction,
+    ))
+}
+
 pub fn find_optimum(
     slot: u64,
     amount: u64,

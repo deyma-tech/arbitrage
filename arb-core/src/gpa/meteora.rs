@@ -9,6 +9,7 @@ use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_sdk::pubkey::Pubkey;
 use utils::pool::{Pool, PoolType};
 
+#[derive(Default)]
 pub struct MeteoraDlmmGPAResult {
     pub pool_type_and_pubkey: HashMap<Pubkey, PoolType>,
     pub pools: HashMap<Pubkey, dex::meteora_dlmm::LbPair>,
@@ -123,7 +124,16 @@ pub fn spawn_meteora_dlmm(
         let result = if let Some(rpc_cfg) = cfg_opt {
             crate::gpa::fetch_program_accounts_with_config(&url, &dex::meteora_dlmm::ID, rpc_cfg).await
         } else {
-            crate::gpa::fetch_program_accounts(&url, &dex::meteora_dlmm::ID).await
+            crate::gpa::fetch_program_accounts_by_discriminators(
+                &url,
+                &dex::meteora_dlmm::ID,
+                &[
+                    dex::meteora_dlmm::LB_PAIR_ACCOUNT_DISCM,
+                    dex::meteora_dlmm::BIN_ARRAY_ACCOUNT_DISCM,
+                    dex::meteora_dlmm::BIN_ARRAY_BITMAP_EXTENSION_ACCOUNT_DISCM,
+                ],
+            )
+            .await
         };
         let mut meteora_dlmm_pools = HashMap::new();
         let mut meteora_dlmm_bin_arrays: HashMap<Pubkey, BTreeMap<i32, (Pubkey, dex::meteora_dlmm::BinArray)>> =

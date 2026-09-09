@@ -51,11 +51,14 @@ pub const DEFAULT_REGION: &str = "EU";
 pub const DEFAULT_JITO_QUICKNODE_LIMIT: u64 = 25;
 
 pub const FORCED_RESTART: u64 = 600;
-pub const DEFAULT_ALT_MANAGER_PATH: &str = "/home/ubuntu/arbitrage/tables";
+/// Runtime ALT metadata is local to the checkout/process and must not depend
+/// on the old VM-only `/home/ubuntu/arbitrage` path.
+pub const DEFAULT_ALT_MANAGER_PATH: &str = "data";
 
 pub const DEFAULT_NEXT_BLOCK_AUTH_TOKEN: &str = "***";
 
 pub const DEFAULT_SERVICE_NAME: &str = "arb.service";
+pub const DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID: &str = "HPXVR7EQc1KE9XAY4wPoTakBTFgs4SNZW75zBaVfufW3";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -69,6 +72,11 @@ pub struct Config {
     pub grpc_pem: String,
     pub grpc_auth_token: String,
     pub keypair: String,
+    /// Sending transactions is opt-in and remains disabled by default.
+    pub enable_execution: bool,
+    /// Deployed isolated PumpSwap/DLMM executor. This is never inferred from
+    /// the legacy SWAP_PROGRAM_ID constant.
+    pub arb_executor_v2_program_id: String,
     pub arbitrage: ArbitrageSettings,
     pub region: String,
     // providers
@@ -94,10 +102,13 @@ impl Default for Config {
             grpc_pem: String::from(DEFAULT_GRPC_PEM),
             grpc_auth_token: String::from(DEFAULT_GRPC_AUTH_TOKEN),
             keypair: String::from(DEFAULT_KEYPAIR),
+            enable_execution: false,
+            arb_executor_v2_program_id: String::from(DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID),
             arbitrage: ArbitrageSettings::default(),
             region: String::from(DEFAULT_REGION),
             // providers
-            providers: String::from("all"),
+            // Dry-run is the safe default. Sending must be explicitly selected.
+            providers: String::from(DEFAULT_PROVIDER),
             jito: providers::JitoConfig::default(),
             jito_quicknode: providers::JitoQuicknodeConfig::default(),
             bloxroute: providers::BloxrouteConfig::default(),
@@ -125,14 +136,76 @@ impl Config {
     }
 }
 
+/// Load simple KEY=VALUE entries without adding a runtime dependency. Existing
+/// process environment variables win over values from this local file.
+pub fn load_dotenv(path: &str) {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return,
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        let value = value
+            .trim()
+            .trim_matches(|character| character == '"' || character == '\'');
+        std::env::set_var(key, value);
+    }
+}
+
 impl Config {
     pub fn load_from_file(path: &str) -> Self {
         let cfg = config::Config::builder()
             .add_source(config::File::with_name(path))
             .build()
             .unwrap();
-        cfg.try_deserialize().or_panic("FailedToDeserializeConfig")
+        let mut cfg: Config = cfg.try_deserialize().or_panic("FailedToDeserializeConfig");
+
+        // Explicit TOML values remain authoritative. These fallbacks make
+        // Chainstack/WSOL setups work when the TOML still has defaults.
+        if cfg.rpc == DEFAULT_RPC_URL {
+            if let Some(value) = first_env(&["CHAINSTACK_TRADER_RPC_URL", "SOLANA_RPC_URL"]) {
+                cfg.rpc = value;
+            }
+        }
+        if cfg.ws == DEFAULT_WS_URL {
+            if let Some(value) = first_env(&["CHAINSTACK_TRADER_WS_URL", "SOLANA_WS_URL"]) {
+                cfg.ws = value;
+            }
+        }
+        if cfg.blockhash_and_simulate_rpc == DEFAULT_BLOCKHASH_RPC_URL {
+            cfg.blockhash_and_simulate_rpc = cfg.rpc.clone();
+        }
+        if cfg.keypair == DEFAULT_KEYPAIR {
+            if let Some(value) = first_env(&["BOT_KEYPAIR_PATH"]) {
+                cfg.keypair = value;
+            }
+        }
+        if cfg.arb_executor_v2_program_id == DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID {
+            if let Some(value) = first_env(&["ARB_EXECUTOR_V2_PROGRAM_ID", "SWAP_PROGRAM_ID"]) {
+                cfg.arb_executor_v2_program_id = value;
+            }
+        }
+        cfg
     }
+}
+
+fn first_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 static CONFIG_CELL: OnceCell<Config> = OnceCell::new();

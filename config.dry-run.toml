@@ -1,0 +1,19 @@
+enable_execution = false
+providers = "log"
+
+[arbitrage]
+# Gross profit floor in WSOL lamports; 10_000_000 = 0.01 SOL.
+min_profit_lamports = 10000000
+# Minimum profit after the estimated/provider execution cost.
+min_net_profit_lamports = 1000000
+# Baseline Bloxroute/Nextblock-style cost: 0.001 SOL tip + 5,000 fee.
+estimated_execution_cost_lamports = 1005000
+# Build and simulate the executor transaction without submitting it.
+dry_run_simulate = true
+# Suppress repeated route/amount entries inside this window.
+dry_run_dedup_window_ms = 1000
+# Protect the RPC while collecting simulation samples.
+dry_run_max_simulations_per_second = 4
+
+[atl_manager]
+path = "data"

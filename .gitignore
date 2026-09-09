@@ -5,6 +5,7 @@
 bin
 /tables
 tables
+data/
 *.log
 .lapce
 tmp/invariant_interface
@@ -13,3 +14,4 @@ scripts/arb_monitor.toml
 perf.data
 .DS_Store
 /arb-bot/src/providers/target
+bot-keypair.json

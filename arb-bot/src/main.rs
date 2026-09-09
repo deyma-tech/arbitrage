@@ -5,6 +5,7 @@ use arb_bot::setup::{get_tables, get_tables_v2};
 use arb_bot::OptimizeResult;
 use arb_core::arbitrage::OpportunityWithCalculators;
 use arb_core::calculator::CalculatorEnum;
+use arb_core::executor_v2::EXECUTOR_V2_PROGRAM_ID;
 
 use arb_core::gpa::{sync_gpa, PoolToCalculator};
 
@@ -18,6 +19,7 @@ use solana_sdk::message::AddressLookupTableAccount;
 use spl_token_2022::extension::transfer_fee::{TransferFeeAmount, TransferFeeConfig};
 use spl_token_2022::extension::{BaseStateWithExtensions, PodStateWithExtensions};
 use spl_token_2022::pod::{PodAccount, PodMint};
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
 use utils::constants::{ALLOWED_TOKEN_2022, WSOL};
@@ -32,7 +34,7 @@ use chrono::Local;
 use std::io::Write;
 use utils::deserialize::{Message, MessagesV2};
 
-use arb_bot::process::{add_to_calculator, partial_deser_v2, process_message};
+use arb_bot::process::{add_to_calculator, process_message};
 use arb_bot::providers::{get_providers, Provider, ProviderType};
 use config::{dump_config, Config, JitoConfig, CONFIG as cfg};
 use utils::queue::Queue;
@@ -78,8 +80,19 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    config::load_dotenv(".env");
     println!("Config: {:?}", cli.config);
     config::init(&cli.config);
+    if cfg.enable_execution {
+        let executor_program = Pubkey::from_str(&cfg.arb_executor_v2_program_id)
+            .map_err(|err| anyhow::anyhow!("ARB_EXECUTOR_V2_PROGRAM_ID inválido: {err}"))?;
+        if executor_program != EXECUTOR_V2_PROGRAM_ID {
+            anyhow::bail!("Execution refused: el executor configurado no coincide con el ABI V2 verificado");
+        }
+        if cfg.arbitrage.enable_flashloan {
+            anyhow::bail!("Execution refused: flashloan todavía no está soportado por executor V2");
+        }
+    }
     telegram::init(
         &cfg.telegram.teloxide_token,
         if cfg.telegram.notification_channel_id != 0 {
@@ -99,12 +112,6 @@ fn main() -> anyhow::Result<()> {
 
     runtime.block_on(async {
         telegram::notify(&format!("Bot '{}' started", cfg.name)).await;
-        if cfg.telegram.notification_channel_id != 0 {
-            match dump_config(&cfg) {
-                Ok(config) => telegram::notify(&config.to_string()).await,
-                Err(err) => debug!("Failed to dump arb config. {err}"),
-            }
-        }
     });
 
     let (tx_pool, _rx_pool) = tokio::sync::mpsc::unbounded_channel::<PoolToCalculator>();
@@ -291,12 +298,12 @@ fn main() -> anyhow::Result<()> {
         let filter: f64 = (filter / filter_factor).to_f64().unwrap();
 
         loop {
-            if !rx_calculators.is_empty() {
-                while let Ok((slot, calculators)) = rx_calculators.try_recv() {
-                    buffer.push((slot, calculators));
-                }
-            } else {
-                continue;
+            let Ok((slot, calculators)) = rx_calculators.recv() else {
+                break;
+            };
+            buffer.push((slot, calculators));
+            while let Ok((slot, calculators)) = rx_calculators.try_recv() {
+                buffer.push((slot, calculators));
             }
 
             let mut slot = 0;
@@ -417,7 +424,17 @@ fn main() -> anyhow::Result<()> {
 
     info!("Opportunity calculation thread started...");
 
-    let mut result = runtime.block_on(async { sync_gpa(&cfg.rpc).await })?;
+    // Use Helius only for the expensive initial GPA snapshot. The live
+    // account streams continue to use the configured Chainstack WebSocket.
+    let (initial_gpa_rpc, initial_gpa_source) = match std::env::var("HELIUS_RPC_URL") {
+        Ok(url) if !url.trim().is_empty() => (url, "HELIUS_RPC_URL"),
+        _ => (cfg.rpc.clone(), "configured RPC"),
+    };
+    info!(
+        "Initial GPA source: {}; live account streams remain on configured WebSocket",
+        initial_gpa_source
+    );
+    let mut result = runtime.block_on(async { sync_gpa(&initial_gpa_rpc, &cfg.ws, tx_messages.clone()).await })?;
 
     let client = solana_client::rpc_client::RpcClient::new(cfg.blockhash_and_simulate_rpc.clone());
     let account_data = client
@@ -614,7 +631,9 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    partial_deser_v2(tx_messages);
+    // sync_gpa owns the two Chainstack program subscriptions and forwards the
+    // same account updates to the calculator pipeline. Keep the process alive.
+    runtime.block_on(std::future::pending::<()>());
 
     Ok(())
 }

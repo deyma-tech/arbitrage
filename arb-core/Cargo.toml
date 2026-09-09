@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = {workspace = true}
+crossbeam-channel = "0.5"
 questdb-rs = "4.0.3"
 solana-sdk = {workspace = true}
 solana-program = {workspace = true}

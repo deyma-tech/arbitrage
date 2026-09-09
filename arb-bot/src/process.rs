@@ -290,7 +290,7 @@ pub async fn get_channel_for_blockhash(blockhash_rpc: String) -> Sender<Hash> {
                             let _ = tx_blockhash.send(blockhash);
                             valid_blockhash = blockhash;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                     }
                     Err(e) => {
                         warn!("Error getting blockhash: {:?}", e);
