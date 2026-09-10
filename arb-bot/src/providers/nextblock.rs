@@ -24,7 +24,7 @@ use utils::base64::b64_encode;
 use utils::constants::ALLOWED_TOKEN_2022;
 use utils::now;
 
-use super::{require_min_net_profit, Provider, SetupResult};
+use super::{fetch_nonce_context, prepare_transaction, require_min_net_profit, NonceLease, Provider, SetupResult};
 
 #[derive(Clone, Debug)]
 pub struct ProviderNextblock {
@@ -46,12 +46,17 @@ impl ProviderNextblock {
 impl Provider for ProviderNextblock {
     #[inline(always)]
     fn get_filter(&self) -> u64 {
-        cfg.bloxroute.filter
+        cfg.nextblock.filter
     }
 
     #[inline(always)]
     fn get_execution_threads(&self) -> u64 {
-        cfg.bloxroute.execution_threads
+        let configured = cfg.nextblock.execution_threads;
+        if cfg.nonce_accounts.is_empty() {
+            configured
+        } else {
+            configured.min(cfg.nonce_accounts.len() as u64)
+        }
     }
 
     fn run(
@@ -83,6 +88,7 @@ impl Provider for ProviderNextblock {
         let mut rx_blockhash = setup.tx_blockhash.subscribe();
 
         let alt = setup.alt;
+        let nonce_manager = setup.nonce_manager.clone();
 
         let mut allowed_token2022 = AHashSet::from_iter(ALLOWED_TOKEN_2022.iter().cloned());
 
@@ -231,7 +237,14 @@ impl Provider for ProviderNextblock {
 
                             //let simulated_cu = 0;
 
-                            builder.push_ix(preparation.to_instruction(tip_result.total_tip));
+                            let mut nonce_lease = match fetch_nonce_context(&simulate_rpc, &nonce_manager).await {
+                                Ok(context) => context,
+                                Err(err) => {
+                                    warn!("Nextblock nonce read failed: {:?}, route={:?}", err, get_pubkeys(&calculators));
+                                    continue 'outer;
+                                }
+                            };
+                            let nonce_context = nonce_lease.as_ref().map(NonceLease::context);
 
                             if cfg.nextblock.simulate {
                                 let start = Instant::now();
@@ -240,7 +253,13 @@ impl Provider for ProviderNextblock {
                                 simulation_builder.add_compute_unit_price((tip_result.compute_unit_price).min(1_200_000));
                                 simulation_builder.add_nextblock_tip_ix(tip_result.provider_tip);
 
-                                let txn = simulation_builder.prepare_tx(&keypair, &alts, blockhash);
+                                let txn = prepare_transaction(
+                                    &mut simulation_builder,
+                                    &keypair,
+                                    &alts,
+                                    blockhash,
+                                    nonce_context,
+                                );
                                 if let Ok(txn) = txn {
                                     let _ = match check_transaction_size(&txn) {
                                         Ok(buffer) => buffer,
@@ -270,7 +289,7 @@ impl Provider for ProviderNextblock {
                                                         let elapsed = start.elapsed();
                                                         let new_cu = cu + 20_000;
                                                         debug!("CCUL: {:?}, SCUL: {:?}, took: {:?}", tip_result_cu, new_cu, elapsed);
-                                                        tip_result.compute_unit_limit = new_cu;
+                                                        tip_result.set_final_compute_unit_limit(new_cu);
                                                     }
                                                 } else {
                                                     // warn!("Simulation Error: {:?}", simulation.value.err);
@@ -281,10 +300,33 @@ impl Provider for ProviderNextblock {
                                 }
                             }
 
+                            // The simulation may have changed the CU limit,
+                            // which changes the priority cost and the minimum
+                            // profit encoded into the executor instruction.
+                            let net_profit = match require_min_net_profit(optimize.diff, tip_result.total_tip) {
+                                Ok(net_profit) => net_profit,
+                                Err(err) => {
+                                    debug!("Nextblock final net-profit reject: {}", err);
+                                    continue 'outer;
+                                }
+                            };
+                            debug!(
+                                "Nextblock final economics: gross={}, provider_tip={}, priority_fee={}, cost={}, net={}, cu_limit={}, cu_price={}",
+                                optimize.diff,
+                                tip_result.provider_tip,
+                                tip_result.priority_fee,
+                                tip_result.total_tip,
+                                net_profit,
+                                tip_result.compute_unit_limit,
+                                tip_result.compute_unit_price
+                            );
+
+                            builder.clear();
+                            builder.push_ix(preparation.to_instruction(tip_result.total_tip));
                             builder.add_compute_unit_limit(tip_result.compute_unit_limit as u32);
                             builder.add_compute_unit_price(tip_result.compute_unit_price);
                             builder.add_nextblock_tip_ix(tip_result.provider_tip);
-                            let txn = builder.prepare_tx(&keypair, &alts, blockhash);
+                            let txn = prepare_transaction(&mut builder, &keypair, &alts, blockhash, nonce_context);
                                 if let Ok(txn) = txn {
                                     let _ = match check_transaction_size(&txn) {
                                         Ok(buffer) => buffer,
@@ -311,9 +353,40 @@ impl Provider for ProviderNextblock {
                                         continue 'outer;
                                     }
                                     timestamp.store(now::as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
-                                    let result = grpc_client.post_submit_v2(request).await;
-                                    if let Ok(response) = result {
-                                        info!("NB: {:?}", response);
+                                    let signature = txn.signatures.first().copied();
+                                    match grpc_client.post_submit_v2(request).await {
+                                        Ok(response) => {
+                                            let response_signature = response.into_inner().signature;
+                                            info!(
+                                                "NextBlock accepted transaction: signature={}",
+                                                response_signature
+                                            );
+                                            if let Some(signature) = signature {
+                                                if let Some(lease) = nonce_lease.as_mut() {
+                                                    match lease
+                                                        .wait_for_finalized(
+                                                            &simulate_rpc,
+                                                            &signature,
+                                                            std::time::Duration::from_millis(
+                                                                cfg.nonce_confirmation_timeout_ms,
+                                                            ),
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(()) => info!("NextBlock transaction finalized: signature={signature}"),
+                                                        Err(err) => warn!("NextBlock transaction finalization failed: signature={signature}, error={err}"),
+                                                    }
+                                                }
+                                            } else if let Some(lease) = nonce_lease.as_mut() {
+                                                lease.quarantine();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            if let Some(lease) = nonce_lease.as_mut() {
+                                                lease.quarantine();
+                                            }
+                                            warn!("NextBlock submission failed: {:?}", err);
+                                        }
                                     }
 
                                 }

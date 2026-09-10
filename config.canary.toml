@@ -1,0 +1,27 @@
+# Explicit live-canary profile. Do not use this for dry-run.
+# Credentials, keypair, nonce accounts and executor ID come from .env.
+enable_execution = true
+canary_single_provider = true
+providers = "jito"
+#providers = "jito,astralane,nozomi,nextblock"
+nonce_confirmation_timeout_ms = 30000
+
+[arbitrage]
+# Keep the first live test to an executor-compatible two-leg route.
+c2 = true
+c3 = false
+allow_dlmm_dlmm = false
+# One small 0.001 SOL input volume; change only after reconciling a canary.
+volumes = [1000000]
+# Require enough gross profit to cover the canary's modeled costs and leave a margin.
+min_profit_lamports = 2000000
+min_net_profit_lamports = 1000000
+estimated_execution_cost_lamports = 1005000
+dry_run_simulate = false
+
+[jito]
+simulate = true
+execution_threads = 1
+
+[atl_manager]
+path = "data"

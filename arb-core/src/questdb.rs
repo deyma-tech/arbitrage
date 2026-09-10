@@ -1,6 +1,10 @@
 pub const BLOXROUTE_MIN_TIP: u64 = 1_000_000;
 pub const JITO_MIN_TIP: u64 = 1_000;
 pub const BLOXROUTE_PALADIN_MIN_TIP: u64 = 50_000_000;
+// Astralane free tier currently documents a 0.001 SOL minimum tip for the
+// single-transaction endpoint.
+pub const ASTRALANE_MIN_TIP: u64 = 1_000_000;
+pub const NOZOMI_MIN_TIP: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ExecutionProviderType {
@@ -14,6 +18,8 @@ pub enum ExecutionProviderType {
     SwQoS,
     HeliusSwQos,
     Nextblock,
+    Astralane,
+    Nozomi,
     BloxrouteJitoBundle,
 }
 
@@ -30,6 +36,8 @@ impl ExecutionProviderType {
             ExecutionProviderType::SwQoS => 0,
             ExecutionProviderType::HeliusSwQos => 0,
             ExecutionProviderType::Nextblock => BLOXROUTE_MIN_TIP,
+            ExecutionProviderType::Astralane => ASTRALANE_MIN_TIP,
+            ExecutionProviderType::Nozomi => NOZOMI_MIN_TIP,
             ExecutionProviderType::BloxrouteJitoBundle => BLOXROUTE_MIN_TIP,
         }
     }
@@ -46,6 +54,8 @@ impl ExecutionProviderType {
             ExecutionProviderType::SwQoS => 8,
             ExecutionProviderType::HeliusSwQos => 9,
             ExecutionProviderType::Nextblock => 0,
+            ExecutionProviderType::Astralane => 0,
+            ExecutionProviderType::Nozomi => 0,
             ExecutionProviderType::BloxrouteJitoBundle => 1,
         }
     }
@@ -64,6 +74,8 @@ impl std::fmt::Display for ExecutionProviderType {
             ExecutionProviderType::SwQoS => write!(f, "swqos"),
             ExecutionProviderType::HeliusSwQos => write!(f, "helius_swqos"),
             ExecutionProviderType::Nextblock => write!(f, "nextblock"),
+            ExecutionProviderType::Astralane => write!(f, "astralane"),
+            ExecutionProviderType::Nozomi => write!(f, "nozomi"),
             ExecutionProviderType::BloxrouteJitoBundle => write!(f, "bloxroute_jito_bundle"),
         }
     }

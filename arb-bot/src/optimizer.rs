@@ -253,6 +253,8 @@ pub fn spawn_filter_arbitrages_v8(
     tx_jito_quicknode_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
     tx_jito_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
     tx_nextblock_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
+    tx_astralane_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
+    tx_nozomi_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
     tx_bloxroute_execution_arbitrages: Vec<ExecutionArbitrageSenderV2>,
     pool_to_table_key: AHashMap<Pubkey, Pubkey>,
     table_key_to_table: AHashMap<Pubkey, AddressLookupTableAccount>,
@@ -318,6 +320,28 @@ pub fn spawn_filter_arbitrages_v8(
                     debug!("Nextblock: {:?}", optimize_result);
                     let idx = rnd_index(&tx_nextblock_execution_arbitrages);
                     let _ = tx_nextblock_execution_arbitrages[idx].send((
+                        opportunity.clone(),
+                        optimize_result.clone(),
+                        alts.clone(),
+                        optional_alts.clone(),
+                    ));
+                }
+                // Astralane single-transaction relay
+                if !tx_astralane_execution_arbitrages.is_empty() && optimize_result.diff > cfg.astralane.filter {
+                    debug!("Astralane: {:?}", optimize_result);
+                    let idx = rnd_index(&tx_astralane_execution_arbitrages);
+                    let _ = tx_astralane_execution_arbitrages[idx].send((
+                        opportunity.clone(),
+                        optimize_result.clone(),
+                        alts.clone(),
+                        optional_alts.clone(),
+                    ));
+                }
+                // Nozomi transaction relay
+                if !tx_nozomi_execution_arbitrages.is_empty() && optimize_result.diff > cfg.nozomi.filter {
+                    debug!("Nozomi: {:?}", optimize_result);
+                    let idx = rnd_index(&tx_nozomi_execution_arbitrages);
+                    let _ = tx_nozomi_execution_arbitrages[idx].send((
                         opportunity.clone(),
                         optimize_result.clone(),
                         alts.clone(),

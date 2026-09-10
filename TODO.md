@@ -4,18 +4,20 @@ Documento de seguimiento para adaptar el bot a Chainstack y preparar una ejecuci
 
 ## P0 — corregir antes de enviar fondos
 
-- [ ] **Recalcular el costo real después de fijar el límite final de compute units.** Hoy los providers calculan un `TipResult`, luego pueden modificar `compute_unit_limit`, pero el `compute_unit_price` y `total_tip` pueden quedar calculados con el límite anterior. Recalcular inmediatamente antes de simular/enviar:
+- [x] **Recalcular el costo real después de fijar el límite final de compute units.** El camino NextBlock recalcula priority fee, costo total y neto después de la calibración por simulación:
   - `priority_fee = ceil(compute_unit_price_micro_lamports * final_cu_limit / 1_000_000)`;
   - costo total conocido: priority fee + tip del provider + fee base + cualquier otro costo;
   - `net = gross_profit - costo_total`;
   - aplicar `min_net_profit_lamports` con esos valores finales.
 - [ ] Mantener separados los dos límites económicos: `min_profit_lamports` como piso bruto y `min_net_profit_lamports` como piso después de costos.
 - [ ] Verificar que la simulación tenga `err = null`, consuma las cuentas/estado esperados y que el dry-run nunca llegue a una operación de envío.
-- [ ] Agregar métricas estructuradas por oportunidad: gross, tip, precio prioritario, CU solicitadas, CU consumidas, costo total, net, resultado de simulación, firma, slot y estado de confirmación.
+- [x] Agregar logs de dry-run para distinguir candidato, rechazo antes de simulación, preparación, simulación OK/rechazada/error RPC, CU consumidas y tiempo.
+- [ ] Completar métricas estructuradas por oportunidad: gross, tip, precio prioritario, CU solicitadas, CU consumidas, costo total, net, resultado de simulación, firma, slot y estado de confirmación.
 
 ## P1 — priority fees y compute units
 
-- [ ] **Conectar el oracle de priority fees al camino activo.** `arb-bot/src/priority_fee.rs` consulta fees recientes, pero revisar que el valor elegido llegue efectivamente a Jito/Bloxroute/Nextblock/QuickNode en la configuración actual de Chainstack.
+- [x] **Conectar el camino NextBlock y sus fees.** `NEXTBLOCK_API_KEY` alimenta el header Authorization, el endpoint gRPC usa TLS regional y el camino activo aplica CU price, tip y recálculo de costo final.
+- [ ] Conectar el oracle de priority fees de `arb-bot/src/priority_fee.rs` al camino activo y validar su costo real.
 - [ ] Hacer configurable el criterio de selección: percentile (por ejemplo p75/p90), multiplicador, máximo y fallback cuando no haya datos. Registrar el valor elegido y su costo real.
 - [ ] No copiar sin medir los valores del repo externo (`550000` CU y `50000` micro-lamports/CU). El costo depende del límite solicitado, y Solana cobra la prioridad usando ese límite aunque la transacción consuma menos.
 - [ ] Reemplazar buffers fijos por calibración por ruta/DEX: simular, tomar `units_consumed`, sumar un margen configurable, aplicar un cap seguro y no superar el máximo de 1.4M CU. No reutilizar un límite histórico sin volver a pasar los guards.
@@ -23,28 +25,31 @@ Documento de seguimiento para adaptar el bot a Chainstack y preparar una ejecuci
 
 ## P1 — nonce accounts y envío
 
-- [ ] Implementar un nonce manager explícito para las cuentas ya disponibles:
-  - reservar una nonce account por lane concurrente;
-  - no reutilizar la misma nonce simultáneamente;
+- [x] Conectar las cuentas nonce configuradas al camino NextBlock y dry-run:
+  - seleccionar cuentas en round-robin;
   - incluir `AdvanceNonceAccount` como primera instrucción;
-  - manejar refresh, reintentos y resultados ambiguos;
-  - verificar inclusión on-chain, no solo aceptación del endpoint.
+  - reutilizar el mismo valor nonce entre simulación y envío;
+  - limitar los lanes NextBlock al número de cuentas configuradas.
+- [~] Nonce manager: ya reserva una cuenta por lane, comparte el nonce entre simulación/envío y espera `finalized`; ante error/timeout ambiguo la cuenta queda en cuarentena durante el proceso. Falta persistir/reconciliar cuarentenas después de un reinicio y definir una política de reintento.
 - [ ] Validar con canary que el nonce mejora la ventana de preparación/entrega. Un durable nonce evita depender de la expiración del recent blockhash, pero no garantiza por sí mismo menor latencia y agrega estado writable/posible contención.
-- [ ] Diseñar fan-out de relayers con los mismos bytes firmados, deduplicación y tracking por firma. Varios relayers mejoran diversidad de entrega; no garantizan inclusión en el mismo bloque.
+- [x] Integrar fan-out opcional a Jito, NextBlock, Astralane y Nozomi, con tips por proveedor y tracking local de firma/confirmación. Cada relay recibe una transacción firmada válida para su ruta; no se asume que todos compartan los mismos bytes ni que garanticen inclusión en el mismo bloque.
+- [x] Aplicar los mínimos conocidos de tip: 0.001 SOL para Astralane y Nozomi; limitar Astralane a 5 envíos single-transaction por segundo y no usar su método bundle del tier free.
 - [ ] Mantener claro el límite de responsabilidades: Chainstack aporta RPC/streams; no equivale automáticamente a un relayer de landing.
 
 ## P2 — cobertura de datos
 
-- [ ] Mantener los dos streams de Chainstack para PumpSwap y Meteora DLMM.
+- [x] Mantener los dos streams de Chainstack para PumpSwap y Meteora DLMM.
+- [x] Deshabilitar por configuración las rutas de tres patas (`c3 = false`) y DLMM↔DLMM (`allow_dlmm_dlmm = false`) en el perfil dry-run, preservando el código para futuras extensiones.
 - [ ] Si se agrega Raydium u otro DEX, evaluar primero el límite de streams/filters y el costo de suscripción. No ampliar el universo sin una estrategia de filtros acotados, snapshot o reparación en background.
 - [ ] Preservar el estado en RAM acotado y controlar memoria/CPU antes de aumentar cobertura; `data/` debe seguir siendo runtime local e ignorado por git.
 
 ## P2 — checklist de canary
 
-- [ ] Resolver el build completo (`protoc`/`nextblock-protos`) y ejecutar tests/checks.
-- [ ] Confirmar ABI, cuentas y programa del executor V2 on-chain mediante simulación.
+- [x] Resolver el build completo (`protoc`/`nextblock-protos`) y ejecutar tests/checks. `cargo check -p arb-bot`, tests unitarios de `arb-core` y release build pasan; el doctest del crate local `config` sigue chocando con la dependencia externa homónima `config@0.15.11`.
+- [ ] Confirmar ABI, cuentas y programa del executor V2 on-chain mediante una simulación de canary con los providers elegidos.
 - [ ] Usar únicamente WSOL de la wallet configurada; flashloan permanece deshabilitado.
-- [ ] Verificar ATA WSOL, balance, blockhash/nonce fresco y estado de pools antes de preparar la transacción.
+- [x] Verificar en el camino de preparación el ATA WSOL configurado, usar sólo WSOL de la wallet, leer un nonce fresco y aplicar los guards de estado/profit antes de preparar la transacción.
+- [ ] Ejecutar el canary real: usar `enable_execution = true`, `providers = "jito,astralane,nozomi,nextblock"`, monto pequeño, una sola oportunidad admitida y esperar `finalized`; no considerar HTTP 200/aceptación del relay como éxito.
 - [ ] Activar ejecución solo explícitamente, con monto pequeño y límites bruto/neto altos; verificar firma, slot y `confirmationStatus` finalizado.
 - [ ] Guardar evidencia del canary y reconciliar balance antes/después.
 

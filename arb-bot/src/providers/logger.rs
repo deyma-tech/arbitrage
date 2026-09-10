@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Receiver;
 use utils::transaction::check_transaction_size;
 
-use super::{Provider, SetupResult};
+use super::{fetch_nonce_context, prepare_transaction, NonceLease, Provider, SetupResult};
 use crate::OptimizeResult;
 use arb_core::calculator::{get_pool_types, get_pubkeys};
 use arb_core::fee::calculate_max_fee;
@@ -80,6 +80,7 @@ impl Provider for ProviderLog {
         let mut rx_blockhash = setup.tx_blockhash.subscribe();
 
         let alt = setup.alt;
+        let nonce_manager = setup.nonce_manager.clone();
 
         let mut allowed_token2022 = AHashSet::from_iter(ALLOWED_TOKEN_2022.iter().cloned());
 
@@ -151,13 +152,15 @@ impl Provider for ProviderLog {
                                 let estimated_cost = cfg.arbitrage.estimated_execution_cost_lamports;
                                 let estimated_net = optimize.diff.saturating_sub(estimated_cost);
                                 info!(
-                                    "DRY-RUN opportunity: gross={}, estimated_cost={}, estimated_net={}, amount={}, slot={}, route={:?}",
+                                    "DRY-RUN candidate: gross={}, estimated_cost={}, estimated_net={}, amount={}, slot={}, route={:?}, types={:?}, mints={:?}",
                                     optimize.diff,
                                     estimated_cost,
                                     estimated_net,
                                     optimize.amount,
                                     opportunity.slot,
-                                    route_pubkeys
+                                    route_pubkeys,
+                                    calculators.iter().map(|c| c.get_pool_type()).collect::<Vec<_>>(),
+                                    mint_pair_route
                                 );
 
                                 if !dry_run_simulate {
@@ -192,7 +195,7 @@ impl Provider for ProviderLog {
                             ) {
                                 Ok(preparation) => preparation,
                                 Err(err) => {
-                                    warn!("Error processing arbitrage: {:?} pools: {:?}, types: {:?}, volume: {:?}", err, 
+                                    warn!("DRY-RUN rejected before simulation: {:?}, pools: {:?}, types: {:?}, volume: {:?}", err,
                                         calculators.iter().map(|c| c.get_pubkey()).collect::<Vec<_>>(),
                                         calculators.iter().map(|c| c.get_pool_type()).collect::<Vec<_>>(),
                                         optimize.amount,
@@ -217,7 +220,15 @@ impl Provider for ProviderLog {
                                 // wrapper is intentionally unavailable here.
                                 builder.push_ix(preparation.to_instruction(0));
 
-                                let txn = builder.prepare_tx(&keypair, &alts, blockhash);
+                                let nonce_lease = match fetch_nonce_context(&rpc_client, &nonce_manager).await {
+                                    Ok(context) => context,
+                                    Err(err) => {
+                                        warn!("DRY-RUN nonce read failed: {:?}, route={:?}", err, route_pubkeys);
+                                        continue 'outer;
+                                    }
+                                };
+                                let nonce_context = nonce_lease.as_ref().map(NonceLease::context);
+                                let txn = prepare_transaction(&mut builder, &keypair, &alts, blockhash, nonce_context);
 
                                 info!("Preparation of tx: {:?}", start.elapsed());
                                 match txn {

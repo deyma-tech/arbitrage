@@ -4,11 +4,14 @@ use arb_core::calculator::CalculatorEnum;
 use arb_core::instruction::ArbitrageCompressedInstructionInput;
 
 use log::{info, warn};
+use once_cell::sync::OnceCell;
 use solana_program::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
 use std::str::FromStr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::Notify;
 
 use crate::priority_fee::spawn_get_priority_fees;
 use crate::process::get_channel_for_blockhash;
@@ -18,6 +21,7 @@ use config::{CONFIG as cfg, DEFAULT_EXECUTION_THREADS};
 use solana_sdk::hash::Hash;
 use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::transaction::VersionedTransaction;
 use spl_associated_token_account::get_associated_token_address;
 use tokio::sync::mpsc::UnboundedReceiver;
 use utils::constants::WSOL;
@@ -56,9 +60,11 @@ pub mod jito_quicknode;
 pub use jito_quicknode::ProviderJitoQuicknode;
 // pub mod bloxroute;
 // pub use bloxroute::ProviderBloxroute;
+pub mod http_relay;
 pub mod logger;
 use crate::providers::bloxroute::ProviderBloxroute;
 use crate::providers::nextblock::ProviderNextblock;
+pub use http_relay::{HttpRelayKind, ProviderHttpRelay};
 pub use logger::ProviderLog;
 
 pub mod bloxroute;
@@ -92,6 +98,8 @@ pub enum ProviderType {
     Bloxroute(ProviderBloxroute),
     Log(ProviderLog),
     Nextblock(ProviderNextblock),
+    Astralane(ProviderHttpRelay),
+    Nozomi(ProviderHttpRelay),
 }
 
 impl ProviderType {
@@ -102,6 +110,8 @@ impl ProviderType {
             ProviderType::Bloxroute(provider) => provider.setup.clone(),
             ProviderType::Log(provider) => provider.setup.clone(),
             ProviderType::Nextblock(provider) => provider.setup.clone(),
+            ProviderType::Astralane(provider) => provider.setup.clone(),
+            ProviderType::Nozomi(provider) => provider.setup.clone(),
         }
     }
 }
@@ -122,12 +132,22 @@ pub async fn get_providers() -> Vec<ProviderType> {
     let providers: Vec<&str> = providers.split(',').collect();
     let mut result = Vec::new();
     for provider in providers {
+        if provider == "astralane" && cfg.astralane.api_key.is_empty() {
+            warn!("Astralane provider requested but ASTRALANE_API_KEY is empty; skipping");
+            continue;
+        }
+        if provider == "nozomi" && cfg.nozomi.api_key.is_empty() {
+            warn!("Nozomi provider requested but NOZOMI_API_KEY is empty; skipping");
+            continue;
+        }
         let provider = match provider {
             "bloxroute" => ProviderType::Bloxroute(ProviderBloxroute::new().await),
             "jitoquicknode" => ProviderType::JitoQuicknode(ProviderJitoQuicknode::new().await),
             "jito" => ProviderType::Jito(ProviderJito::new().await),
             "nextblock" => ProviderType::Nextblock(ProviderNextblock::new().await),
             "log" => ProviderType::Log(ProviderLog::new().await),
+            "astralane" => ProviderType::Astralane(ProviderHttpRelay::new(HttpRelayKind::Astralane).await),
+            "nozomi" => ProviderType::Nozomi(ProviderHttpRelay::new(HttpRelayKind::Nozomi).await),
             &_ => panic!("UnknownProvider"),
         };
         result.push(provider);
@@ -185,6 +205,211 @@ pub struct SetupResult {
     pub tx_blockhash: Sender<Hash>,
     pub tx_priority_fee: Option<Sender<u64>>,
     pub mint_to_ata: HashMap<Pubkey, Pubkey>,
+    pub nonce_manager: Arc<NonceManager>,
+}
+
+/// Round-robin selection of configured durable nonce accounts. The account is
+/// selected once per candidate and the resulting nonce value must be reused
+/// for both simulation and submission of that candidate.
+#[derive(Debug)]
+pub struct NonceManager {
+    accounts: Vec<NonceSlot>,
+    cursor: AtomicU64,
+    available: Notify,
+}
+
+#[derive(Debug)]
+struct NonceSlot {
+    account: Pubkey,
+    busy: AtomicBool,
+}
+
+pub struct NonceLease {
+    manager: Arc<NonceManager>,
+    slot: usize,
+    pub nonce_account: Pubkey,
+    pub nonce_hash: Hash,
+    quarantined: bool,
+    released: bool,
+}
+
+static NONCE_MANAGER: OnceCell<Arc<NonceManager>> = OnceCell::new();
+
+impl NonceManager {
+    fn new(accounts: Vec<Pubkey>) -> Self {
+        Self {
+            accounts: accounts
+                .into_iter()
+                .map(|account| NonceSlot {
+                    account,
+                    busy: AtomicBool::new(false),
+                })
+                .collect(),
+            cursor: AtomicU64::new(0),
+            available: Notify::new(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.accounts.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.accounts.len()
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+    ) -> anyhow::Result<Option<NonceLease>> {
+        if self.accounts.is_empty() {
+            return Ok(None);
+        }
+
+        loop {
+            let start = self.cursor.fetch_add(1, Ordering::Relaxed) as usize;
+            for offset in 0..self.accounts.len() {
+                let slot = (start + offset) % self.accounts.len();
+                let candidate = &self.accounts[slot];
+                if candidate
+                    .busy
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let account = match rpc_client.get_account(&candidate.account).await {
+                    Ok(account) => account,
+                    Err(err) => {
+                        self.release(slot);
+                        return Err(anyhow::anyhow!(
+                            "failed to read nonce account {}: {err}",
+                            candidate.account
+                        ));
+                    }
+                };
+                let nonce_data = match solana_client::nonce_utils::data_from_account(&account) {
+                    Ok(data) => data,
+                    Err(err) => {
+                        self.release(slot);
+                        return Err(anyhow::anyhow!("invalid nonce account {}: {err}", candidate.account));
+                    }
+                };
+
+                return Ok(Some(NonceLease {
+                    manager: self.clone(),
+                    slot,
+                    nonce_account: candidate.account,
+                    nonce_hash: nonce_data.blockhash(),
+                    quarantined: false,
+                    released: false,
+                }));
+            }
+
+            let notified = self.available.notified();
+            tokio::select! {
+                _ = notified => {},
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+            }
+        }
+    }
+
+    fn release(&self, slot: usize) {
+        if let Some(candidate) = self.accounts.get(slot) {
+            candidate.busy.store(false, Ordering::Release);
+            self.available.notify_one();
+        }
+    }
+}
+
+impl NonceLease {
+    pub fn context(&self) -> (Pubkey, Hash) {
+        (self.nonce_account, self.nonce_hash)
+    }
+
+    pub fn quarantine(&mut self) {
+        self.quarantined = true;
+    }
+
+    pub fn release(&mut self) {
+        if !self.released && !self.quarantined {
+            self.manager.release(self.slot);
+            self.released = true;
+        }
+    }
+
+    pub async fn wait_for_finalized(
+        &mut self,
+        rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+        signature: &Signature,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match rpc_client
+                .get_signature_status_with_commitment_and_history(
+                    signature,
+                    solana_sdk::commitment_config::CommitmentConfig::finalized(),
+                    true,
+                )
+                .await
+            {
+                Ok(Some(Ok(()))) => {
+                    self.release();
+                    return Ok(());
+                }
+                Ok(Some(Err(err))) => {
+                    self.release();
+                    return Err(anyhow::anyhow!("transaction finalized with error: {err}"));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    self.quarantine();
+                    return Err(anyhow::anyhow!("failed to query finalized signature: {err}"));
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                self.quarantine();
+                return Err(anyhow::anyhow!(
+                    "transaction was not finalized before nonce lease timeout"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+}
+
+impl Drop for NonceLease {
+    fn drop(&mut self) {
+        if !self.released && !self.quarantined {
+            self.manager.release(self.slot);
+            self.released = true;
+        }
+    }
+}
+
+/// Read one configured durable nonce. This is a small account read, not a
+/// getLatestBlockhash call, and therefore avoids the failing blockhash path.
+pub async fn fetch_nonce_context(
+    rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+    nonce_manager: &Arc<NonceManager>,
+) -> anyhow::Result<Option<NonceLease>> {
+    nonce_manager.acquire(rpc_client).await
+}
+
+pub fn prepare_transaction(
+    builder: &mut arb_core::instruction::IxBuilder,
+    keypair: &Keypair,
+    alts: &[AddressLookupTableAccount],
+    recent_blockhash: Hash,
+    nonce_context: Option<(Pubkey, Hash)>,
+) -> anyhow::Result<VersionedTransaction> {
+    match nonce_context {
+        Some((nonce_account, nonce_hash)) => builder.prepare_tx_with_nonce(keypair, alts, nonce_account, nonce_hash),
+        None => builder.prepare_tx(keypair, alts, recent_blockhash),
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -204,6 +429,22 @@ pub trait Provider {
         //let regions = get_region();
 
         // let record_account = get_record_account(&keypair.pubkey());
+        let nonce_accounts = cfg
+            .nonce_accounts
+            .iter()
+            .map(|value| {
+                Pubkey::from_str(value)
+                    .map_err(|err| anyhow::anyhow!("ARB_NONCE_ACCOUNTS contiene una pubkey inválida {value}: {err}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .unwrap_or_else(|err| panic!("{err}"));
+        let nonce_manager = NONCE_MANAGER
+            .get_or_init(|| Arc::new(NonceManager::new(nonce_accounts)))
+            .clone();
+        if nonce_manager.is_enabled() {
+            info!("Durable nonce accounts configured: {}", nonce_manager.len());
+        }
+
         let balance = if cfg.enable_execution {
             fetch_balance().await
         } else {
@@ -211,7 +452,7 @@ pub trait Provider {
             info!("Execution disabled; skipping wallet balance RPC setup");
             0
         };
-        let needs_blockhash = cfg.enable_execution || cfg.arbitrage.dry_run_simulate;
+        let needs_blockhash = (cfg.enable_execution || cfg.arbitrage.dry_run_simulate) && !nonce_manager.is_enabled();
         let (blockhash, tx_blockhash) = if needs_blockhash {
             let blockhash = fetch_blockhash().await;
             let tx_blockhash = get_channel_for_blockhash(cfg.blockhash_and_simulate_rpc.clone()).await;
@@ -266,6 +507,7 @@ pub trait Provider {
             tx_blockhash,
             tx_priority_fee,
             mint_to_ata: HashMap::default(),
+            nonce_manager,
         }
     }
 
@@ -302,6 +544,8 @@ impl Provider for ProviderType {
             ProviderType::Bloxroute(provider) => provider.get_filter(),
             ProviderType::Nextblock(provider) => provider.get_filter(),
             ProviderType::Log(provider) => provider.get_filter(),
+            ProviderType::Astralane(provider) => provider.get_filter(),
+            ProviderType::Nozomi(provider) => provider.get_filter(),
         }
     }
 
@@ -310,7 +554,9 @@ impl Provider for ProviderType {
             ProviderType::Jito(_) => cfg.jito.execution_threads,
             ProviderType::JitoQuicknode(_) => cfg.jito_quicknode.execution_threads,
             ProviderType::Bloxroute(_) => cfg.bloxroute.execution_threads,
-            ProviderType::Nextblock(_) => cfg.nextblock.execution_threads,
+            ProviderType::Nextblock(provider) => provider.get_execution_threads(),
+            ProviderType::Astralane(provider) => provider.get_execution_threads(),
+            ProviderType::Nozomi(provider) => provider.get_execution_threads(),
             ProviderType::Log(_) => {
                 if cfg.enable_execution {
                     DEFAULT_EXECUTION_THREADS
@@ -351,6 +597,14 @@ impl Provider for ProviderType {
             }
             ProviderType::Nextblock(provider) => {
                 info!("using nextblock provider");
+                provider.run(rx_arbitrage, rx_token2022_bc, cfg_option)
+            }
+            ProviderType::Astralane(provider) => {
+                info!("using astralane provider");
+                provider.run(rx_arbitrage, rx_token2022_bc, cfg_option)
+            }
+            ProviderType::Nozomi(provider) => {
+                info!("using nozomi provider");
                 provider.run(rx_arbitrage, rx_token2022_bc, cfg_option)
             }
         }

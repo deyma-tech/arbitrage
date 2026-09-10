@@ -73,6 +73,9 @@ pub struct ArbitrageSettings {
     pub dry_run_dedup_window_ms: u64,
     /// Safety cap for simulate-only RPC calls in a one-second window.
     pub dry_run_max_simulations_per_second: u64,
+    /// Keep discovery of future routes available, but suppress DLMM↔DLMM
+    /// two-leg candidates until the executor supports that ABI.
+    pub allow_dlmm_dlmm: bool,
     /// group time in milliseconds
     pub opportunity_group_interval: u64,
     /// max number of calculators in a group
@@ -118,6 +121,7 @@ impl Default for ArbitrageSettings {
             dry_run_simulate: false,
             dry_run_dedup_window_ms: 1_000,
             dry_run_max_simulations_per_second: 4,
+            allow_dlmm_dlmm: true,
             opportunity_group_interval: TX_GROUP_TIME_MICROS,
             opportunity_group_saturation: MAX_COUNTER,
             enable_flashloan: false,

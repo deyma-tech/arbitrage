@@ -2,97 +2,14 @@ syntax = "proto3";
 package api;
 option go_package = "github.com/nextblock/api";
 
-import "google/api/annotations.proto";
-import "google/api/field_behavior.proto";
-import "protoc-gen-openapiv2/options/annotations.proto";
-
-option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
-  security: {
-    security_requirement: {
-      key: "Auth Header";
-      value: {
-        scope: []
-      }
-    }
-  }
-  security_definitions: {
-    security: {
-      key: "Auth Header";
-      value: {
-        type: TYPE_API_KEY;
-        in: IN_HEADER;
-        name: "Authorization";
-      };
-    }
-  };
-  info: {
-    title: "NextBlock Solana API";
-    version: "1.0";
-    description: "API for fastest tx delivery in all of solana.";
-    contact: {
-      name: "NextBlock.IO API Documentation";
-      url: "https://docs.nextblock.io/";
-      email: "support@nextblock.io";
-    };
-  };
-
-  consumes: "application/json";
-  produces: "application/json";
-};
-
 service Api {
-  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_tag) = {
-    external_docs: {
-      description: "Detailed API documentation";
-      url: "https://docs.nextblock.io/"
-    }
-  };
+  rpc PostSubmitV2(PostSubmitRequest) returns (PostSubmitResponse);
 
-  rpc PostSubmitV2(PostSubmitRequest) returns (PostSubmitResponse) {
-    option (google.api.http) = {
-      post: "/api/v2/submit"
-      body: "*"
-    };
-    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
-      description: "Submits a signed transaction";
-      summary: "Transaction submit";
-      tags: ["Generic"];
-    };
-  }
+  rpc PostSubmitBatchV2(PostSubmitBatchRequest) returns (PostSubmitResponse);
 
-  rpc PostSubmitBatchV2(PostSubmitBatchRequest) returns (PostSubmitResponse) {
-    option (google.api.http) = {
-      post: "/api/v2/submit-batch"
-      body: "*"
-    };
-    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
-      description: "Submits a batch of signed transactions";
-      summary: "Transaction batch submit";
-      tags: ["Generic"];
-    };
-  }
+  rpc Ping(PingRequest) returns (PongResponse);
 
-  rpc Ping(PingRequest) returns (PongResponse) {
-    option (google.api.http) = {
-      get: "/api/v2/ping"
-    };
-    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
-      description: "Simple ping endpoint to check API health and keep connections alive";
-      summary: "Ping the API server";
-      tags: ["Utility"];
-    };
-  }
-
-  rpc GetTipFloor(TipFloorRequest) returns (TipFloorResponse) {
-    option (google.api.http) = {
-      get: "/api/v2/tipfloor"
-    };
-    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
-      description: "Endpoint to get the last 5 minutes tip distribution";
-      summary: "Get the tip floor";
-      tags: ["Utility"];
-    };
-  }
+  rpc GetTipFloor(TipFloorRequest) returns (TipFloorResponse);
 
   rpc StreamTipFloor(TipFloorStreamRequest) returns (stream TipFloorResponse);
 }
@@ -123,7 +40,7 @@ message PingRequest {}
 message PongResponse {}
 
 message PostSubmitRequest {
-  TransactionMessage transaction = 1 [(google.api.field_behavior) = REQUIRED];
+  TransactionMessage transaction = 1;
   bool skipPreFlight = 2;
   optional bool frontRunningProtection = 3;
   reserved 4, 6, 7;
@@ -135,7 +52,7 @@ message PostSubmitRequest {
 }
 
 message PostSubmitRequestEntry {
-  TransactionMessage transaction = 1 [(google.api.field_behavior) = REQUIRED];
+  TransactionMessage transaction = 1;
 }
 
 message PostSubmitBatchRequest {

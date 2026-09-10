@@ -1398,6 +1398,15 @@ impl PriceMap {
         let mut filtrated = vec![];
         let mut already_inserted = AHashSet::new();
         while let Some((opp, volume)) = opportunities.pop() {
+            if !cfg.arbitrage.allow_dlmm_dlmm
+                && opp.route.len() == 2
+                && opp
+                    .route
+                    .iter()
+                    .all(|(_, pool_type, _)| *pool_type == PoolType::MeteoraDlmm)
+            {
+                continue;
+            }
             let pubkeys = opp.route.iter().map(|(pubkey, _, _)| *pubkey).collect::<Vec<_>>();
             if !already_inserted.contains(&pubkeys) {
                 filtrated.push((opp, volume));

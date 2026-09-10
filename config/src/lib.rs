@@ -14,7 +14,7 @@ pub mod telegram;
 pub mod wallet_manager;
 
 pub mod providers;
-pub use providers::{BloxrouteConfig, JitoConfig, JitoQuicknodeConfig};
+pub use providers::{BloxrouteConfig, HttpRelayConfig, JitoConfig, JitoQuicknodeConfig};
 use wallet_manager::WalletManagerConfig;
 
 mod level_filter_serde;
@@ -42,7 +42,15 @@ pub const DEFAULT_KEYPAIR: &str = "/home/ubuntu/.config/solana/id.json";
 pub const DEFAULT_EXECUTION_THREADS: u64 = 10;
 pub const DEFAULT_OPTIMIZATION_THREADS: usize = 48;
 
-pub const PROVIDERS: [&str; 4] = ["jito", "jitoquicknode", "bloxroute", "log"];
+pub const PROVIDERS: [&str; 7] = [
+    "jito",
+    "jitoquicknode",
+    "bloxroute",
+    "nextblock",
+    "astralane",
+    "nozomi",
+    "log",
+];
 pub const DEFAULT_PROVIDER: &str = "log";
 
 pub const REGIONS: [&str; 2] = ["EU", "US"];
@@ -56,6 +64,8 @@ pub const FORCED_RESTART: u64 = 600;
 pub const DEFAULT_ALT_MANAGER_PATH: &str = "data";
 
 pub const DEFAULT_NEXT_BLOCK_AUTH_TOKEN: &str = "***";
+pub const DEFAULT_ASTRALANE_ENDPOINT: &str = "https://lim.gateway.astralane.io/iris2";
+pub const DEFAULT_NOZOMI_ENDPOINT: &str = "https://nozomi.temporal.xyz/api/sendTransaction2";
 
 pub const DEFAULT_SERVICE_NAME: &str = "arb.service";
 pub const DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID: &str = "HPXVR7EQc1KE9XAY4wPoTakBTFgs4SNZW75zBaVfufW3";
@@ -69,11 +79,21 @@ pub struct Config {
     pub rpc: String,
     pub ws: String,
     pub blockhash_and_simulate_rpc: String,
+    /// Durable nonce accounts used by execution providers. Values may be
+    /// supplied as a TOML array or through ARB_NONCE_ACCOUNTS as a comma-
+    /// separated list.
+    pub nonce_accounts: Vec<String>,
+    /// How long a submitted nonce transaction may remain unfinalized before
+    /// its nonce account is quarantined rather than reused.
+    pub nonce_confirmation_timeout_ms: u64,
     pub grpc_pem: String,
     pub grpc_auth_token: String,
     pub keypair: String,
     /// Sending transactions is opt-in and remains disabled by default.
     pub enable_execution: bool,
+    /// First canary uses only one Jito region to avoid duplicate fills while
+    /// multi-relay fan-out is being validated.
+    pub canary_single_provider: bool,
     /// Deployed isolated PumpSwap/DLMM executor. This is never inferred from
     /// the legacy SWAP_PROGRAM_ID constant.
     pub arb_executor_v2_program_id: String,
@@ -85,6 +105,8 @@ pub struct Config {
     pub jito_quicknode: providers::JitoQuicknodeConfig,
     pub bloxroute: providers::BloxrouteConfig,
     pub nextblock: NextblockConfig,
+    pub astralane: providers::HttpRelayConfig,
+    pub nozomi: providers::HttpRelayConfig,
     pub wallet_manager: WalletManagerConfig,
     // address lookup table
     pub atl_manager: AltManagerSetting,
@@ -99,10 +121,13 @@ impl Default for Config {
             name: "".to_string(),
             ws: String::from(DEFAULT_WS_URL),
             blockhash_and_simulate_rpc: String::from(DEFAULT_BLOCKHASH_RPC_URL),
+            nonce_accounts: vec![],
+            nonce_confirmation_timeout_ms: 30_000,
             grpc_pem: String::from(DEFAULT_GRPC_PEM),
             grpc_auth_token: String::from(DEFAULT_GRPC_AUTH_TOKEN),
             keypair: String::from(DEFAULT_KEYPAIR),
             enable_execution: false,
+            canary_single_provider: false,
             arb_executor_v2_program_id: String::from(DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID),
             arbitrage: ArbitrageSettings::default(),
             region: String::from(DEFAULT_REGION),
@@ -113,6 +138,14 @@ impl Default for Config {
             jito_quicknode: providers::JitoQuicknodeConfig::default(),
             bloxroute: providers::BloxrouteConfig::default(),
             nextblock: providers::NextblockConfig::default(),
+            astralane: providers::HttpRelayConfig {
+                endpoint: String::from(DEFAULT_ASTRALANE_ENDPOINT),
+                ..providers::HttpRelayConfig::default()
+            },
+            nozomi: providers::HttpRelayConfig {
+                endpoint: String::from(DEFAULT_NOZOMI_ENDPOINT),
+                ..providers::HttpRelayConfig::default()
+            },
             wallet_manager: WalletManagerConfig::default(),
             // address lookup table
             atl_manager: AltManagerSetting::default(),
@@ -185,6 +218,23 @@ impl Config {
         if cfg.blockhash_and_simulate_rpc == DEFAULT_BLOCKHASH_RPC_URL {
             cfg.blockhash_and_simulate_rpc = cfg.rpc.clone();
         }
+        if cfg.nonce_accounts.is_empty() {
+            if let Some(value) = first_env(&["ARB_NONCE_ACCOUNTS"]) {
+                cfg.nonce_accounts = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
+        if cfg.nonce_confirmation_timeout_ms == 30_000 {
+            if let Some(value) = first_env(&["ARB_NONCE_CONFIRMATION_TIMEOUT_MS"]) {
+                cfg.nonce_confirmation_timeout_ms = value
+                    .parse()
+                    .unwrap_or_else(|err| panic!("ARB_NONCE_CONFIRMATION_TIMEOUT_MS inválido {value}: {err}"));
+            }
+        }
         if cfg.keypair == DEFAULT_KEYPAIR {
             if let Some(value) = first_env(&["BOT_KEYPAIR_PATH"]) {
                 cfg.keypair = value;
@@ -193,6 +243,37 @@ impl Config {
         if cfg.arb_executor_v2_program_id == DEFAULT_ARB_EXECUTOR_V2_PROGRAM_ID {
             if let Some(value) = first_env(&["ARB_EXECUTOR_V2_PROGRAM_ID", "SWAP_PROGRAM_ID"]) {
                 cfg.arb_executor_v2_program_id = value;
+            }
+        }
+        if cfg.nextblock.grpc_auth_token == DEFAULT_NEXT_BLOCK_AUTH_TOKEN {
+            if let Some(value) = first_env(&["NEXTBLOCK_API_KEY"]) {
+                cfg.nextblock.grpc_auth_token = value;
+            }
+        }
+        if cfg.astralane.api_key.is_empty() {
+            if let Some(value) = first_env(&["ASTRALANE_API_KEY"]) {
+                cfg.astralane.api_key = value;
+            }
+        }
+        if cfg.nozomi.api_key.is_empty() {
+            if let Some(value) = first_env(&["NOZOMI_API_KEY"]) {
+                cfg.nozomi.api_key = value;
+            }
+        }
+        if cfg.astralane.endpoint.is_empty() {
+            cfg.astralane.endpoint = DEFAULT_ASTRALANE_ENDPOINT.to_string();
+        }
+        if cfg.astralane.endpoint == DEFAULT_ASTRALANE_ENDPOINT {
+            if let Some(value) = first_env(&["ASTRALANE_ENDPOINT"]) {
+                cfg.astralane.endpoint = value;
+            }
+        }
+        if cfg.nozomi.endpoint.is_empty() {
+            cfg.nozomi.endpoint = DEFAULT_NOZOMI_ENDPOINT.to_string();
+        }
+        if cfg.nozomi.endpoint == DEFAULT_NOZOMI_ENDPOINT {
+            if let Some(value) = first_env(&["NOZOMI_ENDPOINT"]) {
+                cfg.nozomi.endpoint = value;
             }
         }
         cfg

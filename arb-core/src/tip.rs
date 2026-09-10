@@ -30,6 +30,23 @@ pub struct TipResult {
     pub priority_fee: u64,
 }
 
+impl TipResult {
+    /// Recompute the priority component after simulation changes the final CU
+    /// limit. Solana charges priority fees from the requested limit, so the
+    /// net-profit guard must use this final value.
+    pub fn set_final_compute_unit_limit(&mut self, compute_unit_limit: u64) {
+        self.compute_unit_limit = compute_unit_limit;
+        self.priority_fee = self
+            .compute_unit_price
+            .saturating_mul(compute_unit_limit)
+            .div_ceil(1_000_000);
+        self.total_tip = self
+            .provider_tip
+            .saturating_add(self.priority_fee)
+            .saturating_add(TRANSACTION_FEE);
+    }
+}
+
 pub fn compute_tip(input: &TipInput) -> anyhow::Result<TipResult> {
     if input.provider == ExecutionProviderType::BloxroutePaladin {
         return compute_tip_bloxroute_paladin(input);
@@ -83,6 +100,7 @@ pub fn compute_tip(input: &TipInput) -> anyhow::Result<TipResult> {
     tip_result.total_tip = provider_tip + priority_fee + TRANSACTION_FEE;
     tip_result.provider_tip = provider_tip;
     tip_result.compute_unit_price = compute_unit_price;
+    tip_result.priority_fee = priority_fee;
     Ok(tip_result)
 }
 
@@ -133,5 +151,6 @@ fn compute_tip_bloxroute_paladin(input: &TipInput) -> anyhow::Result<TipResult> 
     tip_result.total_tip = total_tip;
     tip_result.provider_tip = provider_tip;
     tip_result.compute_unit_price = compute_unit_price;
+    tip_result.priority_fee = priority_fee;
     Ok(tip_result)
 }

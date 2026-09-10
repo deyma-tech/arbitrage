@@ -473,6 +473,22 @@ impl IxBuilder {
         ));
     }
 
+    pub fn add_astralane_tip_ix(&mut self, tip: u64) {
+        self.ixs.push(system_instruction::transfer(
+            &self.owner,
+            &pubkey!("astrazznxsGUhWShqgNtAdfrzP2G83DzcWVJDxwV9bF"),
+            tip,
+        ));
+    }
+
+    pub fn add_nozomi_tip_ix(&mut self, tip: u64) {
+        self.ixs.push(system_instruction::transfer(
+            &self.owner,
+            &pubkey!("TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq"),
+            tip,
+        ));
+    }
+
     pub fn add_flashloan_init_pool(&mut self, mint: &Pubkey) {
         let (pool_authority, bump) = Pubkey::find_program_address(
             &[
@@ -878,5 +894,28 @@ impl IxBuilder {
         }
 
         Err(anyhow::anyhow!("FailedToCreateTransaction"))
+    }
+
+    /// Prepare a durable-nonce transaction. Solana requires the advance-nonce
+    /// instruction to be first and the nonce value to be used as the message
+    /// blockhash. The nonce authority is the same payer that signs the swap.
+    pub fn prepare_tx_with_nonce(
+        &mut self,
+        keypair: &Keypair,
+        alts: &[AddressLookupTableAccount],
+        nonce_account: Pubkey,
+        nonce_hash: Hash,
+    ) -> anyhow::Result<VersionedTransaction> {
+        let mut instructions = Vec::with_capacity(self.ixs.len() + 1);
+        instructions.push(system_instruction::advance_nonce_account(
+            &nonce_account,
+            &keypair.pubkey(),
+        ));
+        instructions.extend(self.ixs.clone());
+
+        let msg = v0::Message::try_compile(&keypair.pubkey(), &instructions, alts, nonce_hash)
+            .map_err(|err| anyhow::anyhow!("FailedToCreateDurableNonceMessage: {err}"))?;
+        VersionedTransaction::try_new(VersionedMessage::V0(msg), &[keypair])
+            .map_err(|err| anyhow::anyhow!("FailedToSignDurableNonceTransaction: {err}"))
     }
 }

@@ -133,6 +133,8 @@ fn main() -> anyhow::Result<()> {
     let mut tx_jito_quicknode_execution_arbitrages = vec![];
     let mut tx_jito_execution_arbitrages = vec![];
     let mut tx_nextblock_execution_arbitrages = vec![];
+    let mut tx_astralane_execution_arbitrages = vec![];
+    let mut tx_nozomi_execution_arbitrages = vec![];
     for provider in providers.iter() {
         if provider.get_filter() < filter {
             filter = provider.get_filter();
@@ -166,6 +168,34 @@ fn main() -> anyhow::Result<()> {
                     runtimes.push(runtime);
                 }
             }
+            ProviderType::Astralane(_) => {
+                for _ in 0..provider.get_execution_threads() {
+                    let provider = provider.clone();
+                    let (tx_arbitrage, rx_arbitrage) = tokio::sync::mpsc::unbounded_channel::<(
+                        OpportunityWithCalculators,
+                        OptimizeResult,
+                        Vec<AddressLookupTableAccount>,
+                        Vec<AddressLookupTableAccount>,
+                    )>();
+                    tx_astralane_execution_arbitrages.push(tx_arbitrage);
+                    let runtime = provider.run(rx_arbitrage, tx_token2022_bc.subscribe(), None);
+                    runtimes.push(runtime);
+                }
+            }
+            ProviderType::Nozomi(_) => {
+                for _ in 0..provider.get_execution_threads() {
+                    let provider = provider.clone();
+                    let (tx_arbitrage, rx_arbitrage) = tokio::sync::mpsc::unbounded_channel::<(
+                        OpportunityWithCalculators,
+                        OptimizeResult,
+                        Vec<AddressLookupTableAccount>,
+                        Vec<AddressLookupTableAccount>,
+                    )>();
+                    tx_nozomi_execution_arbitrages.push(tx_arbitrage);
+                    let runtime = provider.run(rx_arbitrage, tx_token2022_bc.subscribe(), None);
+                    runtimes.push(runtime);
+                }
+            }
             ProviderType::JitoQuicknode(_) => {
                 for _ in 0..provider.get_execution_threads() {
                     let provider = provider.clone();
@@ -182,7 +212,11 @@ fn main() -> anyhow::Result<()> {
             }
             ProviderType::Jito(_) => {
                 let (primary_jito, secondary_jito) = JitoConfig::get_regions(&cfg.get_region());
-                let mut engines = secondary_jito;
+                let mut engines = if cfg.canary_single_provider {
+                    Vec::new()
+                } else {
+                    secondary_jito
+                };
                 engines.insert(0, primary_jito);
                 for engine in engines {
                     let provider = provider.clone();
@@ -268,6 +302,8 @@ fn main() -> anyhow::Result<()> {
         tx_jito_quicknode_execution_arbitrages,
         tx_jito_execution_arbitrages,
         tx_nextblock_execution_arbitrages,
+        tx_astralane_execution_arbitrages,
+        tx_nozomi_execution_arbitrages,
         tx_bloxroute_execution_arbitrages,
         pool_table,
         table_table,

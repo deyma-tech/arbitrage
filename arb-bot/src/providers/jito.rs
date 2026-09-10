@@ -25,7 +25,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use utils::{now, queue::Queue};
 
 // use crate::process::process_jito;
-use super::{require_min_net_profit, Provider, SetupResult};
+use super::{fetch_nonce_context, prepare_transaction, require_min_net_profit, NonceLease, Provider, SetupResult};
 //use crate::watch_dog::{ThreadWatchDogType, WATCHDOG as watch_dog};
 
 #[allow(dead_code)]
@@ -88,6 +88,7 @@ impl Provider for ProviderJito {
         let mut rx_blockhash = setup.tx_blockhash.subscribe();
 
         let alt = setup.alt;
+        let nonce_manager = setup.nonce_manager.clone();
 
         let mut allowed_token2022 = AHashSet::from_iter(ALLOWED_TOKEN_2022.iter().cloned());
 
@@ -221,15 +222,23 @@ impl Provider for ProviderJito {
                                     tip_result.total_tip,
                                     net_profit
                                 );
-                                builder.push_ix(preparation.to_instruction(tip_result.total_tip));
+                                let mut nonce_lease = match fetch_nonce_context(&simulate_rpc, &nonce_manager).await {
+                                    Ok(context) => context,
+                                    Err(err) => {
+                                        warn!("Jito nonce read failed: {:?}, route={:?}", err, get_pubkeys(&calculators));
+                                        continue 'outer;
+                                    }
+                                };
+                                let nonce_context = nonce_lease.as_ref().map(NonceLease::context);
                                 if cfg.jito.simulate {
                                     let start = Instant::now();
                                     let mut simulation_builder = builder.clone();
+                                    simulation_builder.push_ix(preparation.to_instruction(tip_result.total_tip));
                                     simulation_builder.add_compute_unit_limit(tip_result.compute_unit_limit as u32);
                                     simulation_builder.add_compute_unit_price((tip_result.compute_unit_price).min(1_200_000));
                                     simulation_builder.add_jito_tip_ix(tip_result.provider_tip);
 
-                                    let txn = simulation_builder.prepare_tx(&keypair, &alts, blockhash);
+                                    let txn = prepare_transaction(&mut simulation_builder, &keypair, &alts, blockhash, nonce_context);
                                     if let Ok(txn) = txn {
                                         let simulation = simulate_rpc.simulate_transaction(&txn).await;
                                         if let Ok(simulation) = simulation {
@@ -252,7 +261,7 @@ impl Provider for ProviderJito {
                                                     let elapsed = start.elapsed();
                                                     let new_cu = cu + 25_000;
                                                     debug!("CCUL: {:?}, SCUL: {:?}, took: {:?}", tip_result.compute_unit_limit, new_cu, elapsed);
-                                                    tip_result.compute_unit_limit = new_cu;
+                                                    tip_result.set_final_compute_unit_limit(new_cu);
                                                 }
                                             } else {
                                                 continue;
@@ -261,6 +270,7 @@ impl Provider for ProviderJito {
                                     }
                                 }
 
+                                builder.push_ix(preparation.to_instruction(tip_result.total_tip));
                                 builder.add_compute_unit_limit(tip_result.compute_unit_limit as u32);
                                 builder.add_compute_unit_price(tip_result.compute_unit_price);
 
@@ -273,7 +283,7 @@ impl Provider for ProviderJito {
                                 }
                                 timestamp.store(now::as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
 
-                                let txn = builder.prepare_tx(&keypair, &alts, blockhash);
+                                let txn = prepare_transaction(&mut builder, &keypair, &alts, blockhash, nonce_context);
 
                                 if let Ok(txn) = txn {
 
@@ -284,9 +294,39 @@ impl Provider for ProviderJito {
                                             continue 'outer;
                                         }
                                     };
+                                    let signature = txn.signatures.first().copied();
                                     let bundle = [txn];
                                     let result = send_bundle_no_wait(&bundle, &mut primary_searcher_client).await;
-                                    info!("Primary Tx result: {:?}", result);
+                                    match result {
+                                        Ok(result) => {
+                                            info!("Jito bundle accepted: {:?}", result);
+                                            if let Some(signature) = signature {
+                                                if let Some(lease) = nonce_lease.as_mut() {
+                                                    match lease
+                                                        .wait_for_finalized(
+                                                            &simulate_rpc,
+                                                            &signature,
+                                                            std::time::Duration::from_millis(
+                                                                cfg.nonce_confirmation_timeout_ms,
+                                                            ),
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(()) => info!("Jito transaction finalized: signature={signature}"),
+                                                        Err(err) => warn!("Jito transaction finalization failed: signature={signature}, error={err}"),
+                                                    }
+                                                }
+                                            } else if let Some(lease) = nonce_lease.as_mut() {
+                                                lease.quarantine();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            if let Some(lease) = nonce_lease.as_mut() {
+                                                lease.quarantine();
+                                            }
+                                            warn!("Jito bundle submission failed: {:?}", err);
+                                        }
+                                    }
                                 }
                             }
                                 buffer.clear();

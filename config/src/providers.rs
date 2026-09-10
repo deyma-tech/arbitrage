@@ -3,6 +3,36 @@ use utils::region::Region;
 
 use crate::{DEFAULT_GRPC_AUTH_TOKEN, DEFAULT_NEXT_BLOCK_AUTH_TOKEN, DEFAULT_QUICKNODE_RPC_URL};
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct HttpRelayConfig {
+    pub api_key: String,
+    pub endpoint: String,
+    pub simulate: bool,
+    pub execution_threads: u64,
+    pub filter: u64,
+    pub priority_fee_percent: u64,
+    pub tip_min_percent: u64,
+    pub tip_max_percent: u64,
+    pub max_priority_fee: u64,
+}
+
+impl Default for HttpRelayConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            endpoint: String::new(),
+            simulate: true,
+            execution_threads: 1,
+            filter: 1_050_000,
+            priority_fee_percent: 2,
+            tip_min_percent: 20,
+            tip_max_percent: 50,
+            max_priority_fee: 50_000,
+        }
+    }
+}
+
 // Jito
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -297,16 +327,14 @@ impl Default for NextblockConfig {
 }
 
 impl NextblockConfig {
-    /// Returns the primary and secondary Bloxroute RPC URLs based on the region.
+    /// Returns the regional NextBlock gRPC endpoint based on the region.
     pub fn get_regions(region: &Region) -> String {
         match region {
-            Region::EU => "http://fra.nextblock.io".to_string(),
-            Region::US => "http://ny.nextblock.io".to_string(),
-            // http://slc.nextblock.io
-            // http://sgp.nextblock.io
-            Region::GB => "http://london.nextblock.io".to_string(),
-            Region::JP => "http://tokyo.nextblock.io".to_string(),
-            Region::NL => "http://fra.nextblock.io".to_string(),
+            Region::EU => "https://fra.nextblock.io:443".to_string(),
+            Region::US => "https://ny.nextblock.io:443".to_string(),
+            Region::GB => "https://london.nextblock.io:443".to_string(),
+            Region::JP => "https://tokyo.nextblock.io:443".to_string(),
+            Region::NL => "https://fra.nextblock.io:443".to_string(),
         }
     }
 }
