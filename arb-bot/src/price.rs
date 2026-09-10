@@ -30,6 +30,21 @@ pub static VOLUMES: Lazy<&'static [u64]> = Lazy::new(|| {
     Box::leak(volumes.into_boxed_slice())
 });
 
+/// Most discovery paths skip the largest and smallest configured volume. A
+/// canary may intentionally configure one or two volumes, where that inner
+/// slice would otherwise have invalid bounds such as `[1..0]`.
+fn discovery_volumes(volumes: &[u64]) -> &[u64] {
+    if volumes.len() > 2 {
+        &volumes[1..volumes.len() - 1]
+    } else {
+        volumes
+    }
+}
+
+fn configured_discovery_volumes() -> &'static [u64] {
+    discovery_volumes(*VOLUMES)
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyedPrice {
     pub pubkey: Pubkey,
@@ -378,7 +393,7 @@ impl PriceMap {
                 if data.amm_info.orderbook_permission() && !data.amm_info.swap_permission() {
                     let mint_pair = calculator.get_sorted_mints_as_array();
                     let pool_pubkey = calculator.get_pubkey();
-                    for volume in VOLUMES[1..VOLUMES.len() - 1].iter() {
+                    for volume in configured_discovery_volumes().iter() {
                         self.remove_from_volume(true, &mint_pair, pool_pubkey, *volume);
                         self.remove_from_volume(false, &mint_pair, pool_pubkey, *volume);
                     }
@@ -970,7 +985,7 @@ impl PriceMap {
         }
         let mut selection = Opportunities::new(self.size);
         let mut compare: Option<OrderedFloat<f64>> = None;
-        for volume in VOLUMES[1..VOLUMES.len() - 1].iter().rev() {
+        for volume in configured_discovery_volumes().iter().rev() {
             let keyed_price1 = match self.take_max(mints, volume, slot, None, index) {
                 None => break,
                 Some(keyed_price) => keyed_price,
@@ -1097,7 +1112,7 @@ impl PriceMap {
         let mut selection = Opportunities::new(self.size * 2);
 
         let mut compare: Option<OrderedFloat<f64>> = None;
-        for volume in VOLUMES[1..VOLUMES.len() - 1].iter().rev() {
+        for volume in configured_discovery_volumes().iter().rev() {
             let keyed_price1 = match self.take_max(&mints_a, volume, slot, None, index) {
                 None => break,
                 Some(keyed_price) => keyed_price,
@@ -1159,7 +1174,7 @@ impl PriceMap {
         }
 
         let mut compare: Option<OrderedFloat<f64>> = None;
-        for volume in VOLUMES[1..VOLUMES.len() - 1].iter().rev() {
+        for volume in configured_discovery_volumes().iter().rev() {
             let keyed_price1 = match self.take_max(&mints_a2, volume, slot, None, index) {
                 None => break,
                 Some(keyed_price) => keyed_price,
@@ -2173,4 +2188,16 @@ pub fn optimize_benchmark(
         }
     }
     Ok(last_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discovery_volumes;
+
+    #[test]
+    fn discovery_volumes_keeps_small_canary_configs_valid() {
+        assert_eq!(discovery_volumes(&[1]), &[1]);
+        assert_eq!(discovery_volumes(&[1, 2]), &[1, 2]);
+        assert_eq!(discovery_volumes(&[1, 2, 3]), &[2]);
+    }
 }

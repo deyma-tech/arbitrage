@@ -13,8 +13,10 @@ use solana_sdk::clock::Slot;
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::select;
+use tokio::sync::Mutex;
 use utils::deserialize::{Message, MessagesV2};
 use utils::pool::PoolType;
 // use zeromq::{Socket, SocketRecv};
@@ -72,6 +74,27 @@ pub fn process_token_2022_account(
 #[inline]
 fn new_rpc_client(url: &str) -> RpcClient {
     RpcClient::new_with_timeout_and_commitment(url.to_string(), Duration::from_secs(600), CommitmentConfig::processed())
+}
+
+// Helius Free documents a 10-RPC-requests/s limit. Keep initial hydration
+// below that ceiling while allowing both DEX tasks to make progress.
+const GPA_HYDRATION_CONCURRENCY: usize = 4;
+const GPA_HYDRATION_REQUEST_INTERVAL: Duration = Duration::from_millis(125);
+static GPA_HYDRATION_NEXT_REQUEST: OnceLock<Arc<Mutex<Instant>>> = OnceLock::new();
+
+async fn pace_gpa_hydration_request() {
+    let limiter = GPA_HYDRATION_NEXT_REQUEST.get_or_init(|| Arc::new(Mutex::new(Instant::now())));
+    let scheduled_at = {
+        let mut next_request = limiter.lock().await;
+        let now = Instant::now();
+        let scheduled_at = (*next_request).max(now);
+        *next_request = scheduled_at + GPA_HYDRATION_REQUEST_INTERVAL;
+        scheduled_at
+    };
+    let now = Instant::now();
+    if scheduled_at > now {
+        tokio::time::sleep(scheduled_at - now).await;
+    }
 }
 
 async fn fetch_program_accounts(url: &str, program_id: &Pubkey) -> Vec<(Pubkey, Account)> {
@@ -145,11 +168,14 @@ where
 
         let client_ref = &client;
         let batches: Vec<Vec<Pubkey>> = pubkeys.chunks(100).map(|chunk| chunk.to_vec()).collect();
+        let batch_count = batches.len();
+        let hydration_started = Instant::now();
         let mut hydration = futures::stream::iter(batches.into_iter().map(|batch_pubkeys| {
             let client_ref = client_ref;
             async move {
                 let mut last_error = None;
                 for attempt in 0..5 {
+                    pace_gpa_hydration_request().await;
                     match client_ref.get_multiple_accounts(&batch_pubkeys).await {
                         Ok(accounts) => return (batch_pubkeys, Ok(accounts)),
                         Err(err) => {
@@ -168,8 +194,9 @@ where
             }
         }))
         // Helius free-tier rate limits apply across both PumpSwap and DLMM
-        // tasks. Keep a small bounded fan-out and retry transient 429s.
-        .buffer_unordered(3);
+        // tasks. Keep a bounded fan-out and pace all requests globally so the
+        // two concurrent DEX snapshots do not burst past the provider limit.
+        .buffer_unordered(GPA_HYDRATION_CONCURRENCY);
         let mut hydrated = 0usize;
 
         while let Some((batch_pubkeys, accounts)) = hydration.next().await {
@@ -202,6 +229,14 @@ where
                 }
             }
         }
+        info!(
+            "GPA hydrate complete: program {:?}, discriminator {:?}, accounts={}, batches={}, elapsed_ms={}",
+            program_id,
+            discriminator,
+            hydrated,
+            batch_count,
+            hydration_started.elapsed().as_millis()
+        );
     }
 
     Ok(())
