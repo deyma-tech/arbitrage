@@ -561,72 +561,74 @@ fn main() -> anyhow::Result<()> {
         let rpc_client = solana_client::rpc_client::RpcClient::new(cfg.blockhash_and_simulate_rpc.clone());
 
         loop {
-            if !rx_messages.is_empty() {
-                if let Ok(msgs) = rx_messages.recv() {
-                    let slot = msgs.slot;
-
-                    let mut calculators = vec![];
-                    let mut pools = vec![];
-
-                    let messages: Vec<Message> = msgs.message;
-                    for msg in messages.into_iter() {
-                        let pool = process_message(&msg, &mut result, &mut token22_set, &mut data_set);
-                        if let Some(pool) = pool {
-                            pools.push(pool);
-                        }
+            let msgs = match rx_messages.recv_timeout(Duration::from_millis(50)) {
+                Ok(msgs) => msgs,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if let Ok(not_allowed_token) = rx_no_allowed_token22.try_recv() {
+                        no_allowed_token22 = not_allowed_token;
                     }
-
-                    for pool in pools.into_iter() {
-                        add_to_calculator(
-                            &pool.pool_type,
-                            &pool.pubkey,
-                            &mut result,
-                            &mut calculators,
-                            msgs.slot,
-                            &rpc_client,
-                        );
-                        if pool.is_new {
-                            let _ = tx_pool.send(pool);
-                        }
-                    }
-
-                    if calculators.is_empty() {
-                        continue;
-                    }
-
-                    let mut calculators_to_send = vec![];
-
-                    for calculator in calculators.iter() {
-                        let sorted_mints = calculator.get_sorted_mints();
-                        if sorted_mints.iter().any(|mint| no_allowed_token22.contains(*mint)) {
-                            continue;
-                        }
-                        // let pubkey = calculator.get_pubkey();
-                        if !cfg.arbitrage.c3 {
-                            if calculator.get_sorted_mints().contains(&&WSOL) {
-                                calculators_to_send.push(Box::new(calculator.clone()));
-                            }
-                        } else {
-                            calculators_to_send.push(Box::new(calculator.clone()));
-                        }
-                        // This should be faster if pubkey is already in the map - need to benchmark
-                        //pubkey_to_calculators.entry(*pubkey).or_insert(calculator.clone());
-                    }
-
-                    if !calculators_to_send.is_empty() {
-                        debug!("Sent {:?}", calculators_to_send.len());
-                        let _ = tx_calculators.send((slot, calculators_to_send));
-                    }
-
-                    if !data_set.is_empty() {
-                        let _ = tx_dataset.send(data_set.clone());
-                        data_set.clear();
-                    }
+                    continue;
                 }
-            } else if !rx_no_allowed_token22.is_empty() {
-                if let Some(not_allowed_token) = rx_no_allowed_token22.blocking_recv() {
-                    no_allowed_token22 = not_allowed_token;
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
+            let slot = msgs.slot;
+
+            let mut calculators = vec![];
+            let mut pools = vec![];
+
+            let messages: Vec<Message> = msgs.message;
+            for msg in messages.into_iter() {
+                let pool = process_message(&msg, &mut result, &mut token22_set, &mut data_set);
+                if let Some(pool) = pool {
+                    pools.push(pool);
                 }
+            }
+
+            for pool in pools.into_iter() {
+                add_to_calculator(
+                    &pool.pool_type,
+                    &pool.pubkey,
+                    &mut result,
+                    &mut calculators,
+                    msgs.slot,
+                    &rpc_client,
+                );
+                if pool.is_new {
+                    let _ = tx_pool.send(pool);
+                }
+            }
+
+            if calculators.is_empty() {
+                continue;
+            }
+
+            let mut calculators_to_send = vec![];
+
+            for calculator in calculators.iter() {
+                let sorted_mints = calculator.get_sorted_mints();
+                if sorted_mints.iter().any(|mint| no_allowed_token22.contains(*mint)) {
+                    continue;
+                }
+                // let pubkey = calculator.get_pubkey();
+                if !cfg.arbitrage.c3 {
+                    if calculator.get_sorted_mints().contains(&&WSOL) {
+                        calculators_to_send.push(Box::new(calculator.clone()));
+                    }
+                } else {
+                    calculators_to_send.push(Box::new(calculator.clone()));
+                }
+                // This should be faster if pubkey is already in the map - need to benchmark
+                //pubkey_to_calculators.entry(*pubkey).or_insert(calculator.clone());
+            }
+
+            if !calculators_to_send.is_empty() {
+                debug!("Sent {:?}", calculators_to_send.len());
+                let _ = tx_calculators.send((slot, calculators_to_send));
+            }
+
+            if !data_set.is_empty() {
+                let _ = tx_dataset.send(data_set.clone());
+                data_set.clear();
             }
         }
     });

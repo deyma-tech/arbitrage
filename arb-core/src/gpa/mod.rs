@@ -85,23 +85,30 @@ async fn fetch_program_accounts(url: &str, program_id: &Pubkey) -> Vec<(Pubkey, 
     }
 }
 
-/// Fetch account data without asking the RPC to materialize one enormous
+/// Visit account data without asking the RPC to materialize one enormous
 /// full-data GPA response. The first request returns only matching pubkeys;
 /// account data is then hydrated through bounded getMultipleAccounts batches.
 /// This is especially important for large DLMM programs.
-pub async fn fetch_program_accounts_by_discriminators(
+pub async fn for_each_program_account_by_discriminators<F>(
     url: &str,
     program_id: &Pubkey,
-    discriminators: &[[u8; 8]],
-) -> Vec<(Pubkey, Account)> {
+    discriminators: &[(Option<u64>, [u8; 8])],
+    mut process: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Pubkey, Account) -> anyhow::Result<()> + Send,
+{
     let client = new_rpc_client(url);
-    let mut all_accounts = Vec::new();
 
-    for discriminator in discriminators {
-        let filters = vec![RpcFilterType::Memcmp(Memcmp::new(
+    for (data_size, discriminator) in discriminators {
+        let mut filters = Vec::with_capacity(2);
+        if let Some(data_size) = data_size {
+            filters.push(RpcFilterType::DataSize(*data_size));
+        }
+        filters.push(RpcFilterType::Memcmp(Memcmp::new(
             0,
             MemcmpEncodedBytes::Bytes(discriminator.to_vec()),
-        ))];
+        )));
         let config = RpcProgramAccountsConfig {
             filters: Some(filters),
             account_config: RpcAccountInfoConfig {
@@ -125,7 +132,7 @@ pub async fn fetch_program_accounts_by_discriminators(
                     "GPA index failed: program {:?}, discriminator {:?}: {:?}",
                     program_id, discriminator, err
                 );
-                return vec![];
+                return Err(anyhow::anyhow!("GPA index failed: {:?}", err));
             }
         };
         let pubkeys: Vec<Pubkey> = indexed.into_iter().map(|(pubkey, _)| pubkey).collect();
@@ -136,28 +143,82 @@ pub async fn fetch_program_accounts_by_discriminators(
             pubkeys.len()
         );
 
-        for chunk in pubkeys.chunks(100) {
-            let accounts = match client.get_multiple_accounts(chunk).await {
+        let client_ref = &client;
+        let batches: Vec<Vec<Pubkey>> = pubkeys.chunks(100).map(|chunk| chunk.to_vec()).collect();
+        let mut hydration = futures::stream::iter(batches.into_iter().map(|batch_pubkeys| {
+            let client_ref = client_ref;
+            async move {
+                let mut last_error = None;
+                for attempt in 0..5 {
+                    match client_ref.get_multiple_accounts(&batch_pubkeys).await {
+                        Ok(accounts) => return (batch_pubkeys, Ok(accounts)),
+                        Err(err) => {
+                            last_error = Some(err);
+                            if attempt < 4 {
+                                let delay_ms = 250u64 * (1u64 << attempt);
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                            }
+                        }
+                    }
+                }
+                (
+                    batch_pubkeys,
+                    Err(last_error.expect("hydration attempts must record an error")),
+                )
+            }
+        }))
+        // Helius free-tier rate limits apply across both PumpSwap and DLMM
+        // tasks. Keep a small bounded fan-out and retry transient 429s.
+        .buffer_unordered(3);
+        let mut hydrated = 0usize;
+
+        while let Some((batch_pubkeys, accounts)) = hydration.next().await {
+            let accounts = match accounts {
                 Ok(accounts) => accounts,
                 Err(err) => {
                     error!(
                         "GPA hydrate failed: program {:?}, discriminator {:?}, batch_size={}: {:?}",
                         program_id,
                         discriminator,
-                        chunk.len(),
+                        batch_pubkeys.len(),
                         err
                     );
-                    return vec![];
+                    return Err(anyhow::anyhow!("GPA hydrate failed: {:?}", err));
                 }
             };
-            for (pubkey, account) in chunk.iter().copied().zip(accounts) {
+            hydrated += batch_pubkeys.len();
+            if hydrated == batch_pubkeys.len() || hydrated / 10_000 != (hydrated - batch_pubkeys.len()) / 10_000 {
+                info!(
+                    "GPA hydrate progress: program {:?}, discriminator {:?}, accounts={}/{}",
+                    program_id,
+                    discriminator,
+                    hydrated,
+                    pubkeys.len()
+                );
+            }
+            for (pubkey, account) in batch_pubkeys.into_iter().zip(accounts) {
                 if let Some(account) = account {
-                    all_accounts.push((pubkey, account));
+                    process(pubkey, account)?;
                 }
             }
         }
     }
 
+    Ok(())
+}
+
+/// Compatibility wrapper for callers that need an owned account vector.
+pub async fn fetch_program_accounts_by_discriminators(
+    url: &str,
+    program_id: &Pubkey,
+    discriminators: &[(Option<u64>, [u8; 8])],
+) -> Vec<(Pubkey, Account)> {
+    let mut all_accounts = Vec::new();
+    let _ = for_each_program_account_by_discriminators::<_>(url, program_id, discriminators, |pubkey, account| {
+        all_accounts.push((pubkey, account));
+        Ok(())
+    })
+    .await;
     all_accounts
 }
 

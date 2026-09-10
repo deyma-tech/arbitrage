@@ -6,6 +6,7 @@ use crate::gpa::PoolToCalculator;
 use anyhow::Context;
 use config::CONFIG as cfg;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
+use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
 use utils::pool::{Pool, PoolType};
 
@@ -121,26 +122,13 @@ pub fn spawn_meteora_dlmm(
     cfg_opt: Option<RpcProgramAccountsConfig>,
 ) -> tokio::task::JoinHandle<MeteoraDlmmGPAResult> {
     tokio::spawn(async move {
-        let result = if let Some(rpc_cfg) = cfg_opt {
-            crate::gpa::fetch_program_accounts_with_config(&url, &dex::meteora_dlmm::ID, rpc_cfg).await
-        } else {
-            crate::gpa::fetch_program_accounts_by_discriminators(
-                &url,
-                &dex::meteora_dlmm::ID,
-                &[
-                    dex::meteora_dlmm::LB_PAIR_ACCOUNT_DISCM,
-                    dex::meteora_dlmm::BIN_ARRAY_ACCOUNT_DISCM,
-                    dex::meteora_dlmm::BIN_ARRAY_BITMAP_EXTENSION_ACCOUNT_DISCM,
-                ],
-            )
-            .await
-        };
         let mut meteora_dlmm_pools = HashMap::new();
         let mut meteora_dlmm_bin_arrays: HashMap<Pubkey, BTreeMap<i32, (Pubkey, dex::meteora_dlmm::BinArray)>> =
             HashMap::new();
         let mut meteora_dlmm_bitmap_extensions = HashMap::new();
         let mut pool_type_and_pubkey: HashMap<Pubkey, PoolType> = HashMap::new();
-        result.into_iter().for_each(|(pubkey, account)| {
+
+        let mut process_account = |pubkey: Pubkey, account: Account| {
             let res = process_meteora_dlmm(
                 pubkey,
                 account.data.as_slice(),
@@ -152,7 +140,30 @@ pub fn spawn_meteora_dlmm(
             if let Err(e) = res {
                 log::error!("Failed to process meteora dlmm: {:?}", e);
             }
-        });
+            Ok(())
+        };
+
+        if let Some(rpc_cfg) = cfg_opt {
+            let result = crate::gpa::fetch_program_accounts_with_config(&url, &dex::meteora_dlmm::ID, rpc_cfg).await;
+            for (pubkey, account) in result {
+                let _ = process_account(pubkey, account);
+            }
+        } else if let Err(err) = crate::gpa::for_each_program_account_by_discriminators(
+            &url,
+            &dex::meteora_dlmm::ID,
+            &[
+                (None, dex::meteora_dlmm::LB_PAIR_ACCOUNT_DISCM),
+                (None, dex::meteora_dlmm::BIN_ARRAY_ACCOUNT_DISCM),
+                (None, dex::meteora_dlmm::BIN_ARRAY_BITMAP_EXTENSION_ACCOUNT_DISCM),
+            ],
+            &mut process_account,
+        )
+        .await
+        {
+            log::error!("Meteora DLMM GPA hydration failed: {:?}", err);
+            return MeteoraDlmmGPAResult::default();
+        }
+
         MeteoraDlmmGPAResult {
             pool_type_and_pubkey,
             pools: meteora_dlmm_pools,

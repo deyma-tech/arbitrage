@@ -2,6 +2,7 @@ use ahash::AHashMap as HashMap;
 
 use config::CONFIG as cfg;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
+use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
 use utils::pool::{Pool, PoolType};
 
@@ -56,27 +57,14 @@ pub fn spawn_pump_amm(
     cfg_opt: Option<RpcProgramAccountsConfig>,
 ) -> tokio::task::JoinHandle<PumpAmmGPAResult> {
     tokio::spawn(async move {
-        let result = if let Some(rpc_cfg) = cfg_opt {
-            crate::gpa::fetch_program_accounts_with_config(&url, &dex::pump_amm::ID, rpc_cfg).await
-        } else {
-            crate::gpa::fetch_program_accounts_by_discriminators(
-                &url,
-                &dex::pump_amm::ID,
-                &[
-                    dex::pump_amm::POOL_DISCRIMINATOR,
-                    dex::pump_amm::GLOBAL_CONFIG_DISCRIMINATOR,
-                    dex::pump_amm::FEE_DISCRIMINATOR,
-                ],
-            )
-            .await
-        };
         let mut pump_amm_result = PumpAmmGPAResult {
             pool_type_and_pubkey: Default::default(),
             pools: Default::default(),
             config: Default::default(),
             fee_config: Default::default(),
         };
-        result.into_iter().for_each(|(pubkey, account)| {
+
+        let mut process_account = |pubkey: Pubkey, account: Account| {
             let res = process_pump_amm(
                 pubkey,
                 account.data.as_slice(),
@@ -88,7 +76,30 @@ pub fn spawn_pump_amm(
             if let Err(e) = res {
                 log::warn!("Failed to process pump amm: {:?}", e);
             }
-        });
+            Ok(())
+        };
+
+        if let Some(rpc_cfg) = cfg_opt {
+            let result = crate::gpa::fetch_program_accounts_with_config(&url, &dex::pump_amm::ID, rpc_cfg).await;
+            for (pubkey, account) in result {
+                let _ = process_account(pubkey, account);
+            }
+        } else if let Err(err) = crate::gpa::for_each_program_account_by_discriminators(
+            &url,
+            &dex::pump_amm::ID,
+            &[
+                (Some(245), dex::pump_amm::POOL_DISCRIMINATOR),
+                (None, dex::pump_amm::GLOBAL_CONFIG_DISCRIMINATOR),
+                (None, dex::pump_amm::FEE_DISCRIMINATOR),
+            ],
+            &mut process_account,
+        )
+        .await
+        {
+            log::error!("PumpSwap GPA hydration failed: {:?}", err);
+            return PumpAmmGPAResult::default();
+        }
+
         pump_amm_result
     })
 }
