@@ -14,6 +14,7 @@ pub struct PumpAmmGPAResult {
     pub pools: HashMap<Pubkey, dex::pump_amm::Pool>,
     pub config: HashMap<Pubkey, dex::pump_amm::GlobalConfig>,
     pub fee_config: HashMap<Pubkey, dex::pump_amm::FeeConfig>,
+    pub snapshot_accounts: Vec<crate::gpa::SnapshotAccount>,
 }
 
 pub fn process_pump_amm(
@@ -62,6 +63,7 @@ pub fn spawn_pump_amm(
             pools: Default::default(),
             config: Default::default(),
             fee_config: Default::default(),
+            snapshot_accounts: Vec::new(),
         };
 
         let mut process_account = |pubkey: Pubkey, account: Account| {
@@ -75,6 +77,17 @@ pub fn spawn_pump_amm(
             );
             if let Err(e) = res {
                 log::warn!("Failed to process pump amm: {:?}", e);
+            }
+            if (account.data.starts_with(&dex::pump_amm::POOL_DISCRIMINATOR)
+                && pump_amm_result.pools.contains_key(&pubkey))
+                || account.data.starts_with(&dex::pump_amm::GLOBAL_CONFIG_DISCRIMINATOR)
+                || account.data.starts_with(&dex::pump_amm::FEE_DISCRIMINATOR)
+            {
+                pump_amm_result.snapshot_accounts.push(crate::gpa::SnapshotAccount::new(
+                    pubkey,
+                    dex::pump_amm::ID,
+                    account.data,
+                ));
             }
             Ok(())
         };

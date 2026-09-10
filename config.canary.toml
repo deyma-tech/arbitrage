@@ -13,10 +13,12 @@ c3 = false
 allow_dlmm_dlmm = false
 # One small 0.001 SOL input volume; change only after reconciling a canary.
 volumes = [1000000]
-# Require enough gross profit to cover the canary's modeled costs and leave a margin.
-min_profit_lamports = 2000000
-min_net_profit_lamports = 1000000
-estimated_execution_cost_lamports = 1005000
+# Jito's minimum tip is much lower than the HTTP relays. Admit smaller
+# candidates for the first canary while retaining a positive net floor.
+# 250000 lamports = 0.00025 SOL gross; 50000 lamports = 0.00005 SOL net.
+min_profit_lamports = 250000
+min_net_profit_lamports = 50000
+estimated_execution_cost_lamports = 100000
 dry_run_simulate = false
 
 [jito]

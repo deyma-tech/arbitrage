@@ -16,6 +16,7 @@ pub struct MeteoraDlmmGPAResult {
     pub pools: HashMap<Pubkey, dex::meteora_dlmm::LbPair>,
     pub bin_arrays: HashMap<Pubkey, BTreeMap<i32, (Pubkey, dex::meteora_dlmm::BinArray)>>,
     pub bitmap_extensions: HashMap<Pubkey, (Pubkey, dex::meteora_dlmm::BinArrayBitmapExtension)>,
+    pub snapshot_accounts: Vec<crate::gpa::SnapshotAccount>,
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +128,7 @@ pub fn spawn_meteora_dlmm(
             HashMap::new();
         let mut meteora_dlmm_bitmap_extensions = HashMap::new();
         let mut pool_type_and_pubkey: HashMap<Pubkey, PoolType> = HashMap::new();
+        let mut snapshot_accounts = Vec::new();
 
         let mut process_account = |pubkey: Pubkey, account: Account| {
             let res = process_meteora_dlmm(
@@ -139,6 +141,35 @@ pub fn spawn_meteora_dlmm(
             );
             if let Err(e) = res {
                 log::error!("Failed to process meteora dlmm: {:?}", e);
+            }
+            let keep_for_snapshot = if account.data.starts_with(&dex::meteora_dlmm::LB_PAIR_ACCOUNT_DISCM) {
+                meteora_dlmm_pools.contains_key(&pubkey)
+            } else if account.data.starts_with(&dex::meteora_dlmm::BIN_ARRAY_ACCOUNT_DISCM) {
+                dex::meteora_dlmm::BinArrayAccount::deserialize(account.data.as_slice())
+                    .map(|account| {
+                        let bin_array = account.0;
+                        meteora_dlmm_pools.contains_key(&bin_array.lb_pair)
+                            && meteora_dlmm_bin_arrays
+                                .get(&bin_array.lb_pair)
+                                .is_some_and(|arrays| arrays.contains_key(&(bin_array.index as i32)))
+                    })
+                    .unwrap_or(false)
+            } else if account
+                .data
+                .starts_with(&dex::meteora_dlmm::BIN_ARRAY_BITMAP_EXTENSION_ACCOUNT_DISCM)
+            {
+                dex::meteora_dlmm::BinArrayBitmapExtensionAccount::deserialize(account.data.as_slice())
+                    .map(|account| meteora_dlmm_pools.contains_key(&account.0.lb_pair))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if keep_for_snapshot {
+                snapshot_accounts.push(crate::gpa::SnapshotAccount::new(
+                    pubkey,
+                    dex::meteora_dlmm::ID,
+                    account.data,
+                ));
             }
             Ok(())
         };
@@ -164,11 +195,22 @@ pub fn spawn_meteora_dlmm(
             return MeteoraDlmmGPAResult::default();
         }
 
+        if cfg.arbitrage.is_c2_only() {
+            // BinArray/bitmap updates may arrive before their LbPair on the
+            // live stream, so process_meteora_dlmm intentionally keeps those
+            // pending entries. Once the discriminator-indexed initial load is
+            // complete, remove only dependencies whose LbPair is outside the
+            // WSOL universe.
+            meteora_dlmm_bin_arrays.retain(|lb_pair, _| meteora_dlmm_pools.contains_key(lb_pair));
+            meteora_dlmm_bitmap_extensions.retain(|lb_pair, _| meteora_dlmm_pools.contains_key(lb_pair));
+        }
+
         MeteoraDlmmGPAResult {
             pool_type_and_pubkey,
             pools: meteora_dlmm_pools,
             bin_arrays: meteora_dlmm_bin_arrays,
             bitmap_extensions: meteora_dlmm_bitmap_extensions,
+            snapshot_accounts,
         }
     })
 }

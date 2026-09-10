@@ -460,15 +460,29 @@ fn main() -> anyhow::Result<()> {
 
     info!("Opportunity calculation thread started...");
 
-    // Use Helius only for the expensive initial GPA snapshot. The live
-    // account streams continue to use the configured Chainstack WebSocket.
+    // Use Helius only for the expensive initial GPA snapshot. Live account
+    // updates use Chainstack Yellowstone when configured, with the old
+    // Chainstack WebSocket kept as an explicit fallback.
     let (initial_gpa_rpc, initial_gpa_source) = match std::env::var("HELIUS_RPC_URL") {
         Ok(url) if !url.trim().is_empty() => (url, "HELIUS_RPC_URL"),
         _ => (cfg.rpc.clone(), "configured RPC"),
     };
+    let live_source = if std::env::var("CHAINSTACK_YELLOWSTONE_GRPC_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+        && std::env::var("CHAINSTACK_YELLOWSTONE_GRPC_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+    {
+        "CHAINSTACK_YELLOWSTONE_GRPC"
+    } else {
+        "configured Chainstack WebSocket"
+    };
     info!(
-        "Initial GPA source: {}; live account streams remain on configured WebSocket",
-        initial_gpa_source
+        "Initial GPA source: {}; live account streams: {}",
+        initial_gpa_source, live_source
     );
     let mut result = runtime.block_on(async { sync_gpa(&initial_gpa_rpc, &cfg.ws, tx_messages.clone()).await })?;
 

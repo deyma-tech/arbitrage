@@ -1,6 +1,7 @@
 use ahash::{AHashMap as HashMap, AHashSet};
+use config::CONFIG as cfg;
 use crossbeam_channel::Sender;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -17,8 +18,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::select;
 use tokio::sync::Mutex;
+use tonic::transport::ClientTlsConfig;
 use utils::deserialize::{Message, MessagesV2};
 use utils::pool::PoolType;
+use yellowstone_grpc_client::GeyserGrpcClient;
+use yellowstone_grpc_proto::prelude::{
+    subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeRequestPing,
+};
 // use zeromq::{Socket, SocketRecv};
 
 use crate::calculator::CalculatorEnum;
@@ -77,9 +84,11 @@ fn new_rpc_client(url: &str) -> RpcClient {
 }
 
 // Helius Free documents a 10-RPC-requests/s limit. Keep initial hydration
-// below that ceiling while allowing both DEX tasks to make progress.
-const GPA_HYDRATION_CONCURRENCY: usize = 4;
-const GPA_HYDRATION_REQUEST_INTERVAL: Duration = Duration::from_millis(125);
+// below that ceiling while allowing both DEX tasks to make progress. The
+// limiter is global across PumpSwap and DLMM, so increasing concurrency does
+// not create an uncontrolled burst.
+const GPA_HYDRATION_CONCURRENCY: usize = 8;
+const GPA_HYDRATION_REQUEST_INTERVAL: Duration = Duration::from_millis(110);
 static GPA_HYDRATION_NEXT_REQUEST: OnceLock<Arc<Mutex<Instant>>> = OnceLock::new();
 
 async fn pace_gpa_hydration_request() {
@@ -339,6 +348,183 @@ type GpaSnapshot = (
     saros::SarosDlmmGPAResult,
 );
 
+const MARKET_SNAPSHOT_VERSION: u32 = 2;
+
+/// Raw account bytes are the stable snapshot format. Typed DEX structs are
+/// rebuilt through the normal processors on load, so a snapshot cannot drift
+/// from the live update path or bypass venue-specific decoding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotAccount {
+    pub pubkey: [u8; 32],
+    pub owner: [u8; 32],
+    pub data: Vec<u8>,
+}
+
+impl SnapshotAccount {
+    pub fn new(pubkey: Pubkey, owner: Pubkey, data: Vec<u8>) -> Self {
+        Self {
+            pubkey: pubkey.to_bytes(),
+            owner: owner.to_bytes(),
+            data,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct MarketSnapshot {
+    version: u32,
+    c2_only: bool,
+    slot: u64,
+    accounts: Vec<SnapshotAccount>,
+}
+
+fn market_snapshot_path() -> std::path::PathBuf {
+    std::env::var("ARBS_MARKET_SNAPSHOT_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("data/market-snapshot.bin"))
+}
+
+fn snapshot_pubkey(bytes: [u8; 32]) -> Pubkey {
+    Pubkey::new_from_array(bytes)
+}
+
+fn snapshot_to_gpa(snapshot: MarketSnapshot) -> anyhow::Result<(GpaSnapshot, u64)> {
+    if snapshot.version != MARKET_SNAPSHOT_VERSION {
+        anyhow::bail!("unsupported market snapshot version {}", snapshot.version);
+    }
+    if snapshot.c2_only != cfg.arbitrage.is_c2_only() {
+        anyhow::bail!(
+            "snapshot scope mismatch: snapshot c2_only={}, current c2_only={}",
+            snapshot.c2_only,
+            cfg.arbitrage.is_c2_only()
+        );
+    }
+
+    let mut pump = pump::PumpAmmGPAResult::default();
+    let mut dlmm = meteora::MeteoraDlmmGPAResult::default();
+    for account in snapshot.accounts {
+        let pubkey = snapshot_pubkey(account.pubkey);
+        let owner = snapshot_pubkey(account.owner);
+        if owner == dex::pump_amm::ID {
+            pump::process_pump_amm(
+                pubkey,
+                &account.data,
+                &mut pump.pools,
+                &mut pump.config,
+                &mut pump.fee_config,
+                &mut pump.pool_type_and_pubkey,
+            )?;
+        } else if owner == dex::meteora_dlmm::ID {
+            meteora::process_meteora_dlmm(
+                pubkey,
+                &account.data,
+                &mut dlmm.pools,
+                &mut dlmm.bin_arrays,
+                &mut dlmm.bitmap_extensions,
+                &mut dlmm.pool_type_and_pubkey,
+            )?;
+        }
+    }
+    if pump.pools.is_empty() || dlmm.pools.is_empty() {
+        anyhow::bail!("market snapshot has no usable PumpSwap/DLMM pools");
+    }
+    info!(
+        "Market snapshot loaded: slot={}, PumpSwap pools={}, Meteora DLMM pools={}, bin-array groups={}",
+        snapshot.slot,
+        pump.pools.len(),
+        dlmm.pools.len(),
+        dlmm.bin_arrays.len()
+    );
+    Ok((
+        (
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            pump,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            dlmm,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ),
+        snapshot.slot,
+    ))
+}
+
+fn load_market_snapshot() -> Option<(GpaSnapshot, u64)> {
+    let path = market_snapshot_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return None,
+    };
+    match bincode::deserialize::<MarketSnapshot>(&bytes) {
+        Ok(snapshot) => match snapshot_to_gpa(snapshot) {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                warn!("Ignoring invalid market snapshot {}: {:?}", path.display(), err);
+                None
+            }
+        },
+        Err(err) => {
+            warn!("Ignoring invalid market snapshot {}: {:?}", path.display(), err);
+            None
+        }
+    }
+}
+
+async fn save_market_snapshot(pump: &pump::PumpAmmGPAResult, dlmm: &meteora::MeteoraDlmmGPAResult, url: &str) {
+    let slot = match new_rpc_client(url).get_slot().await {
+        Ok(slot) => slot,
+        Err(err) => {
+            warn!("Market snapshot skipped: could not read current slot: {:?}", err);
+            return;
+        }
+    };
+    let mut accounts = Vec::with_capacity(pump.snapshot_accounts.len() + dlmm.snapshot_accounts.len());
+    accounts.extend(pump.snapshot_accounts.iter().cloned());
+    accounts.extend(dlmm.snapshot_accounts.iter().cloned());
+    let snapshot = MarketSnapshot {
+        version: MARKET_SNAPSHOT_VERSION,
+        c2_only: cfg.arbitrage.is_c2_only(),
+        slot,
+        accounts,
+    };
+    let bytes = match bincode::serialize(&snapshot) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("Market snapshot serialization failed: {:?}", err);
+            return;
+        }
+    };
+    let path = market_snapshot_path();
+    if let Some(parent) = path.parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            warn!("Market snapshot directory creation failed: {:?}", err);
+            return;
+        }
+    }
+    let tmp_path = path.with_extension("bin.tmp");
+    if let Err(err) = tokio::fs::write(&tmp_path, bytes).await {
+        warn!("Market snapshot write failed: {:?}", err);
+        return;
+    }
+    if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+        warn!("Market snapshot commit failed: {:?}", err);
+        return;
+    }
+    info!(
+        "Market snapshot saved: path={}, slot={}, accounts={}, bytes={}",
+        path.display(),
+        slot,
+        snapshot.accounts.len(),
+        std::fs::metadata(&path).map(|metadata| metadata.len()).unwrap_or(0)
+    );
+}
+
 /// Chainstack-compatible initial snapshot. The two mandatory DEXs are the
 /// only ones hydrated and subscribed; all other DEX result sets stay empty.
 async fn get_chainstack_gpa(url: &str) -> anyhow::Result<GpaSnapshot> {
@@ -363,6 +549,7 @@ async fn get_chainstack_gpa(url: &str) -> anyhow::Result<GpaSnapshot> {
         dlmm.pools.len(),
         dlmm.bin_arrays.len()
     );
+    save_market_snapshot(&pump, &dlmm, url).await;
 
     Ok((
         Default::default(),
@@ -554,11 +741,142 @@ struct ChainstackAccountUpdate {
     data: Vec<u8>,
 }
 
+fn yellowstone_endpoint() -> Option<String> {
+    let endpoint = std::env::var("CHAINSTACK_YELLOWSTONE_GRPC_ENDPOINT").ok()?;
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    Some(if endpoint.contains("://") {
+        endpoint.to_owned()
+    } else {
+        format!("https://{endpoint}")
+    })
+}
+
+async fn stream_yellowstone_accounts(
+    endpoint: String,
+    token: String,
+    from_slot: Option<u64>,
+    tx: tokio::sync::mpsc::UnboundedSender<ChainstackAccountUpdate>,
+    tx_updates: Sender<MessagesV2>,
+) -> anyhow::Result<()> {
+    let tls_config = ClientTlsConfig::new().with_native_roots();
+    let mut client = GeyserGrpcClient::build_from_shared(endpoint.clone())?
+        .x_token(Some(token))?
+        .tls_config(tls_config)?
+        .connect()
+        .await?;
+
+    let mut accounts = std::collections::HashMap::new();
+    accounts.insert(
+        "pumpswap".to_owned(),
+        SubscribeRequestFilterAccounts {
+            account: vec![],
+            owner: vec![dex::pump_amm::ID.to_string()],
+            filters: vec![],
+            nonempty_txn_signature: None,
+        },
+    );
+    accounts.insert(
+        "meteora_dlmm".to_owned(),
+        SubscribeRequestFilterAccounts {
+            account: vec![],
+            owner: vec![dex::meteora_dlmm::ID.to_string()],
+            filters: vec![],
+            nonempty_txn_signature: None,
+        },
+    );
+
+    let request = SubscribeRequest {
+        accounts,
+        commitment: Some(CommitmentLevel::Processed as i32),
+        from_slot,
+        ..SubscribeRequest::default()
+    };
+    let (mut subscribe_tx, mut stream) = client.subscribe_with_request(Some(request)).await?;
+    info!(
+        "Chainstack Yellowstone account stream active: PumpSwap + Meteora DLMM{}",
+        from_slot
+            .map(|slot| format!(", replay_from_slot={slot}"))
+            .unwrap_or_default()
+    );
+
+    while let Some(message) = stream.next().await {
+        match message {
+            Ok(message) => match message.update_oneof {
+                Some(UpdateOneof::Account(update)) => {
+                    let Some(account) = update.account else { continue };
+                    let pubkey = Pubkey::try_from(account.pubkey)
+                        .map_err(|_| anyhow::anyhow!("invalid Yellowstone account pubkey"))?;
+                    let owner = Pubkey::try_from(account.owner)
+                        .map_err(|_| anyhow::anyhow!("invalid Yellowstone account owner"))?;
+                    let data = account.data;
+                    let slot = update.slot;
+                    if tx_updates
+                        .send(MessagesV2 {
+                            message: vec![Message {
+                                pubkey,
+                                owner,
+                                data: data.clone(),
+                            }],
+                            slot,
+                        })
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                    if tx.send(ChainstackAccountUpdate { pubkey, owner, data }).is_err() {
+                        return Ok(());
+                    }
+                }
+                Some(UpdateOneof::Ping(_)) => {
+                    subscribe_tx
+                        .send(SubscribeRequest {
+                            ping: Some(SubscribeRequestPing { id: 1 }),
+                            ..SubscribeRequest::default()
+                        })
+                        .await?;
+                }
+                Some(UpdateOneof::Pong(_)) | Some(UpdateOneof::Slot(_)) => {}
+                Some(_) | None => {}
+            },
+            Err(err) => return Err(anyhow::anyhow!("Yellowstone stream error: {err:?}")),
+        }
+    }
+    anyhow::bail!("Yellowstone account stream closed")
+}
+
 async fn stream_chainstack_accounts(
     ws_url: String,
+    replay_from_slot: Option<u64>,
     tx: tokio::sync::mpsc::UnboundedSender<ChainstackAccountUpdate>,
     tx_updates: Sender<MessagesV2>,
 ) {
+    if let (Some(endpoint), Ok(token)) = (
+        yellowstone_endpoint(),
+        std::env::var("CHAINSTACK_YELLOWSTONE_GRPC_TOKEN"),
+    ) {
+        let mut replay_from_slot = replay_from_slot;
+        loop {
+            let replay = replay_from_slot;
+            match stream_yellowstone_accounts(endpoint.clone(), token.clone(), replay, tx.clone(), tx_updates.clone())
+                .await
+            {
+                Ok(()) => return,
+                Err(err) => {
+                    error!("Chainstack Yellowstone stream failed: {:?}; reconnecting", err);
+                    // Replay is only needed for the first connection. Replaying
+                    // the whole snapshot gap after every disconnect would
+                    // duplicate updates and waste CPU.
+                    replay_from_slot = None;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    warn!("Yellowstone is not configured; falling back to Chainstack WebSocket account streams");
     loop {
         let client = match solana_client::nonblocking::pubsub_client::PubsubClient::new(&ws_url).await {
             Ok(client) => client,
@@ -638,6 +956,8 @@ async fn stream_chainstack_accounts(
 }
 
 pub async fn sync_gpa(url: &str, ws_url: &str, tx_updates: Sender<MessagesV2>) -> anyhow::Result<GPAResult> {
+    let cached_snapshot = load_market_snapshot();
+    let replay_from_slot = cached_snapshot.as_ref().map(|(_, slot)| slot.saturating_add(1));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(
         //goose_gama::GooseGammaGPAResult,
         orca::OrcaSwapV2GPAResult,
@@ -658,8 +978,16 @@ pub async fn sync_gpa(url: &str, ws_url: &str, tx_updates: Sender<MessagesV2>) -
 
     tokio::spawn({
         let url = url.to_string();
+        let cached_snapshot = cached_snapshot;
         async move {
             info!("GPA start");
+            if let Some((snapshot, _slot)) = cached_snapshot {
+                info!("GPA snapshot: using local market snapshot; live replay remains enabled");
+                if let Err(e) = tx.send(snapshot).await {
+                    error!("Failed to send cached GPA result: {:?}", e);
+                }
+                return;
+            }
             loop {
                 match get_chainstack_gpa(&url).await {
                     Ok((
@@ -791,6 +1119,7 @@ pub async fn sync_gpa(url: &str, ws_url: &str, tx_updates: Sender<MessagesV2>) -
     // queue while the HTTP snapshot is slow or retrying.
     tokio::spawn(stream_chainstack_accounts(
         ws_url.to_string(),
+        replay_from_slot,
         tx_socket.clone(),
         tx_updates.clone(),
     ));

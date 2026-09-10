@@ -45,6 +45,15 @@ fn configured_discovery_volumes() -> &'static [u64] {
     discovery_volumes(*VOLUMES)
 }
 
+#[inline]
+fn route_allowed_by_dlmm_filter(route: &[(Pubkey, PoolType, [u8; 8])], allow_dlmm_dlmm: bool) -> bool {
+    allow_dlmm_dlmm
+        || route.len() != 2
+        || !route
+            .iter()
+            .all(|(_, pool_type, _)| *pool_type == PoolType::MeteoraDlmm)
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyedPrice {
     pub pubkey: Pubkey,
@@ -1413,13 +1422,7 @@ impl PriceMap {
         let mut filtrated = vec![];
         let mut already_inserted = AHashSet::new();
         while let Some((opp, volume)) = opportunities.pop() {
-            if !cfg.arbitrage.allow_dlmm_dlmm
-                && opp.route.len() == 2
-                && opp
-                    .route
-                    .iter()
-                    .all(|(_, pool_type, _)| *pool_type == PoolType::MeteoraDlmm)
-            {
+            if !route_allowed_by_dlmm_filter(&opp.route, cfg.arbitrage.allow_dlmm_dlmm) {
                 continue;
             }
             let pubkeys = opp.route.iter().map(|(pubkey, _, _)| *pubkey).collect::<Vec<_>>();
@@ -2192,12 +2195,25 @@ pub fn optimize_benchmark(
 
 #[cfg(test)]
 mod tests {
-    use super::discovery_volumes;
+    use super::{discovery_volumes, route_allowed_by_dlmm_filter};
+    use solana_sdk::pubkey::Pubkey;
+    use utils::pool::PoolType;
 
     #[test]
     fn discovery_volumes_keeps_small_canary_configs_valid() {
         assert_eq!(discovery_volumes(&[1]), &[1]);
         assert_eq!(discovery_volumes(&[1, 2]), &[1, 2]);
         assert_eq!(discovery_volumes(&[1, 2, 3]), &[2]);
+    }
+
+    #[test]
+    fn dlmm_filter_does_not_drop_mixed_two_leg_routes() {
+        let pump = (Pubkey::default(), PoolType::PumpAmm, [0; 8]);
+        let dlmm = (Pubkey::new_from_array([1; 32]), PoolType::MeteoraDlmm, [0; 8]);
+        let dlmm_only = (Pubkey::new_from_array([2; 32]), PoolType::MeteoraDlmm, [0; 8]);
+
+        assert!(route_allowed_by_dlmm_filter(&[pump, dlmm], false));
+        assert!(!route_allowed_by_dlmm_filter(&[dlmm, dlmm_only], false));
+        assert!(route_allowed_by_dlmm_filter(&[dlmm, dlmm_only], true));
     }
 }

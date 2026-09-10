@@ -38,15 +38,15 @@ Documento de seguimiento para adaptar el bot a Chainstack y preparar una ejecuci
 
 ## P2 — cobertura de datos
 
-- [x] Mantener los dos streams de Chainstack para PumpSwap y Meteora DLMM.
+- [x] Mantener dos filtros de cuentas en un stream Chainstack Yellowstone para PumpSwap y Meteora DLMM; el WebSocket estándar queda como fallback.
 - [x] Deshabilitar por configuración las rutas de tres patas (`c3 = false`) y DLMM↔DLMM (`allow_dlmm_dlmm = false`) en el perfil dry-run, preservando el código para futuras extensiones.
 - [ ] Si se agrega Raydium u otro DEX, evaluar primero el límite de streams/filters y el costo de suscripción. No ampliar el universo sin una estrategia de filtros acotados, snapshot o reparación en background.
 - [ ] Preservar el estado en RAM acotado y controlar memoria/CPU antes de aumentar cobertura; `data/` debe seguir siendo runtime local e ignorado por git.
-- [ ] Implementar un snapshot de mercado separado del almacenamiento de ALT, por ejemplo `data/market-snapshot/`, con versión de esquema, slot de referencia, checksum y escritura atómica (`tmp` + rename). No serializar ciegamente todo el `GPAResult` ni guardar los cientos de miles de `BinArray` irrelevantes.
-- [ ] Guardar en el snapshot únicamente el universo admitido por el perfil activo y sus dependencias exactas: pools WSOL PumpSwap/DLMM, `BinArray` no vacíos, bitmap extensions, reservas/token accounts necesarios y metadatos de frescura.
-- [ ] En el arranque, cargar el snapshot mientras se conectan los streams; ejecutar un índice liviano de pubkeys y comparar contra el snapshot. Refrescar sólo cuentas conocidas viejas, cuentas nuevas y cuentas desaparecidas, sin deshabilitar el descubrimiento incremental.
+- [x] Implementar un snapshot de mercado separado del almacenamiento de ALT en `data/market-snapshot.bin`, con versión, slot de referencia y escritura atómica (`tmp` + rename). Se guardan bytes crudos y se reconstruyen con los decoders existentes; no se serializa ciegamente todo el `GPAResult`.
+- [x] Guardar en el snapshot el universo admitido por el perfil activo y sus dependencias exactas: pools WSOL PumpSwap/DLMM, `BinArray` no vacíos y bitmap extensions. El formato queda preparado para ampliar token accounts/reservas si el perfil las requiere.
+- [x] En el arranque, cargar el snapshot mientras se conecta Yellowstone y solicitar replay desde el slot siguiente, preservando el descubrimiento incremental de cuentas nuevas y cambios recientes.
 - [ ] Para cada pool nuevo, hidratar también sus dependencias antes de incorporarlo al cálculo: reservas/supply/token accounts en PumpSwap y `BinArray`/bitmap en Meteora DLMM. No habilitar ejecución con una ruta parcialmente hidratada.
-- [ ] Agregar reconciliación después de cada reconexión del `programSubscribe` y periódicamente: detectar cuentas creadas, modificadas o eliminadas durante el hueco del WebSocket. El stream sirve para cambios en vivo, pero no debe ser la única fuente de inventario histórico.
+- [ ] Agregar reconciliación después de cada reconexión de Yellowstone y periódicamente: detectar cuentas creadas, modificadas o eliminadas durante el hueco del stream. El replay desde snapshot cubre el arranque, pero no reemplaza esta reconciliación histórica.
 - [ ] Registrar métricas de cold start y reconciliación: edad/slot del snapshot, cuentas reutilizadas, nuevas, eliminadas, reparadas, dependencias faltantes y tiempo hasta el primer estado quoteable.
 
 ## P2 — checklist de canary

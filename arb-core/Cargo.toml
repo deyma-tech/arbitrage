@@ -36,3 +36,6 @@ zmq2 = {workspace = true}
 spl-token-2022 = "8.0.1"
 spl-memo = "6.0.0"
 nextblock-client = { path = "../nextblock-client"}
+tonic = { version = "0.12.3", features = ["transport", "tls"] }
+yellowstone-grpc-client = { workspace = true }
+yellowstone-grpc-proto = { workspace = true }

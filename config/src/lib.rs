@@ -203,10 +203,11 @@ impl Config {
             .unwrap();
         let mut cfg: Config = cfg.try_deserialize().or_panic("FailedToDeserializeConfig");
 
-        // Explicit TOML values remain authoritative. These fallbacks make
-        // Chainstack/WSOL setups work when the TOML still has defaults.
+        // Explicit TOML values remain authoritative. Helius is preferred for
+        // HTTP reads (balance, nonce state and simulation) when configured;
+        // Yellowstone/Chainstack remains the live account-stream transport.
         if cfg.rpc == DEFAULT_RPC_URL {
-            if let Some(value) = first_env(&["CHAINSTACK_TRADER_RPC_URL", "SOLANA_RPC_URL"]) {
+            if let Some(value) = first_env(&["HELIUS_RPC_URL", "SOLANA_RPC_URL", "CHAINSTACK_TRADER_RPC_URL"]) {
                 cfg.rpc = value;
             }
         }
